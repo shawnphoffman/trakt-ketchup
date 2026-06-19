@@ -149,12 +149,17 @@ body {
   transition: filter 0.15s ease, transform 0.06s ease, background 0.15s ease;
 }
 
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   filter: brightness(1.25);
 }
 
-.icon-btn:active {
+.icon-btn:active:not(:disabled) {
   transform: translateY(1px);
+}
+
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .icon-btn svg {

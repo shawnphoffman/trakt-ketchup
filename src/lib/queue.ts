@@ -41,6 +41,22 @@ export class WatchedQueue {
     return this.pending.length
   }
 
+  /**
+   * Remove the most recent still-pending enqueue of an item (for go-back).
+   * Returns true if it was found before being flushed; false means it has
+   * already been sent to Trakt and must be undone via the API instead.
+   */
+  unqueue(item: FeedItem): boolean {
+    for (let i = this.pending.length - 1; i >= 0; i--) {
+      const p = this.pending[i]
+      if (p.item.type === item.type && p.item.media.ids.trakt === item.media.ids.trakt) {
+        this.pending.splice(i, 1)
+        return true
+      }
+    }
+    return false
+  }
+
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer)

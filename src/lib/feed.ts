@@ -45,6 +45,16 @@ export class Feed {
     return this.buffer.slice(0, n)
   }
 
+  /** Put an item back at the front of the buffer (used by go-back). */
+  pushFront(item: FeedItem) {
+    this.buffer.unshift(item)
+  }
+
+  /** Reverse an optimistic exclusion so an item can be acted on again. */
+  unexclude(type: MediaType, traktId: number) {
+    this.excluded.delete(keyOf(type, traktId))
+  }
+
   private wantsMovies() {
     return this.filter === 'movies' || this.filter === 'both'
   }

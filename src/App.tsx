@@ -1,14 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Card } from './components/Card'
 import { beginLogin, clearTokens, completeLoginIfRedirected, loadTokens } from './lib/auth'
-import { getMeta, recordSkip, replaceWatchedCache, setMeta, type MediaType } from './lib/db'
+import {
+  getMeta,
+  markUnwatchedLocal,
+  recordSkip,
+  removeSkip,
+  replaceWatchedCache,
+  setMeta,
+  type MediaType,
+} from './lib/db'
 import { Feed } from './lib/feed'
 import { WatchedQueue } from './lib/queue'
 import { loadSettings, saveSettings, type Settings } from './lib/settings'
-import { getWatchedMovieIds, getWatchedShowIds, type FeedItem } from './lib/trakt'
+import { getWatchedMovieIds, getWatchedShowIds, removeFromHistory, type FeedItem, type WatchedAt } from './lib/trakt'
 import { gradientFor } from './lib/visual'
 
 type Phase = 'loading' | 'need-config' | 'connect' | 'ready' | 'error'
+
+/** A reversible action, kept so go-back can restore the title and undo it. */
+type PastAction =
+  | { kind: 'skip'; item: FeedItem }
+  | { kind: 'watched'; item: FeedItem; mode: WatchedAt }
 
 const WATCHED_SYNC_TTL = 1000 * 60 * 60 * 6 // re-sync the watched cache every 6h
 
@@ -22,6 +35,8 @@ export default function App() {
 
   const feedRef = useRef<Feed | null>(null)
   const queueRef = useRef<WatchedQueue | null>(null)
+  const historyRef = useRef<PastAction[]>([])
+  const [canGoBack, setCanGoBack] = useState(false)
 
   const advance = useCallback(async () => {
     const feed = feedRef.current
@@ -71,6 +86,8 @@ export default function App() {
       await feed.init()
       if (cancelled) return
       feedRef.current = feed
+      historyRef.current = [] // the old feed's items are gone; can't go back across a rebuild
+      setCanGoBack(false)
       setCurrent(await feed.next())
     })()
     return () => {
@@ -85,6 +102,8 @@ export default function App() {
     feedRef.current.exclude(item.type, item.media.ids.trakt)
     await queueRef.current.enqueue(item, settings.watchMode)
     setPending(queueRef.current.pendingCount)
+    historyRef.current.push({ kind: 'watched', item, mode: settings.watchMode })
+    setCanGoBack(true)
     await advance()
   }, [current, settings.watchMode, advance])
 
@@ -93,8 +112,42 @@ export default function App() {
     if (!item || !feedRef.current) return
     feedRef.current.exclude(item.type, item.media.ids.trakt)
     await recordSkip(item.type, item.media.ids.trakt, Date.now())
+    historyRef.current.push({ kind: 'skip', item })
+    setCanGoBack(true)
     await advance()
   }, [current, advance])
+
+  // Restore the title you just acted on and reverse its side effects.
+  const goBack = useCallback(async () => {
+    const feed = feedRef.current
+    if (!feed) return
+    const last = historyRef.current.pop()
+    if (!last) return
+    setCanGoBack(historyRef.current.length > 0)
+
+    // Put the title currently on screen back at the front so it isn't lost,
+    // un-suppress the restored one, and show it immediately.
+    if (current) feed.pushFront(current)
+    feed.unexclude(last.item.type, last.item.media.ids.trakt)
+    setCurrent(last.item)
+
+    if (last.kind === 'skip') {
+      await removeSkip(last.item.type, last.item.media.ids.trakt)
+    } else {
+      const queue = queueRef.current
+      const stillPending = queue?.unqueue(last.item) ?? false
+      if (queue) setPending(queue.pendingCount)
+      await markUnwatchedLocal(last.item.type, last.item.media.ids.trakt)
+      // If it already flushed to Trakt, remove it there too.
+      if (!stillPending) {
+        try {
+          await removeFromHistory(last.item, last.mode)
+        } catch (e) {
+          console.error('Go-back: failed to remove from Trakt history', e)
+        }
+      }
+    }
+  }, [current])
 
   // Keyboard nav: J/← skip, K/→/Space watched.
   useEffect(() => {
@@ -111,11 +164,14 @@ export default function App() {
       } else if (e.key === 'k' || e.key === 'ArrowRight' || e.key === ' ') {
         e.preventDefault()
         void onWatched()
+      } else if (e.key === 'Backspace' || e.key === 'u' || e.key === 'U') {
+        e.preventDefault()
+        void goBack()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [phase, showSettings, onSkip, onWatched])
+  }, [phase, showSettings, onSkip, onWatched, goBack])
 
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((prev) => {
@@ -154,6 +210,15 @@ export default function App() {
               {pending} queued
             </span>
           )}
+          <button
+            className="icon-btn"
+            onClick={() => void goBack()}
+            disabled={!canGoBack}
+            aria-label="Go back to the previous title"
+            title="Go back (Backspace)"
+          >
+            <BackIcon />
+          </button>
           <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
             <GearIcon />
           </button>
@@ -232,6 +297,23 @@ function Backdrop({ item }: { item: FeedItem | null }) {
       )}
       <div className="backdrop-scrim" />
     </div>
+  )
+}
+
+function BackIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="1 4 1 10 7 10" />
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+    </svg>
   )
 }
 

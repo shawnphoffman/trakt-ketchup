@@ -194,3 +194,13 @@ async function getAiredSeasons(showId: number): Promise<SeasonPayload[]> {
 export async function addToHistory(payload: HistoryPayload): Promise<void> {
   await api(`/sync/history`, { method: 'POST', body: JSON.stringify(payload) })
 }
+
+/**
+ * Remove a previously-added item from Trakt history. Used by go-back when the
+ * watched mark was already flushed (removal is by ids/seasons, watched_at is
+ * irrelevant, but we reuse buildHistoryPayload to mirror exactly what was sent).
+ */
+export async function removeFromHistory(item: FeedItem, mode: WatchedAt): Promise<void> {
+  const payload = await buildHistoryPayload(item, mode)
+  await api(`/sync/history/remove`, { method: 'POST', body: JSON.stringify(payload) })
+}

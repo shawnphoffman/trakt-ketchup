@@ -9,7 +9,7 @@ export function keyOf(type: MediaType, traktId: number): string {
   return `${type}:${traktId}`
 }
 
-interface CatchupDB extends DBSchema {
+interface KetchupDB extends DBSchema {
   watched: {
     key: string
     value: { key: string; type: MediaType; traktId: number; addedAt: number }
@@ -25,11 +25,11 @@ interface CatchupDB extends DBSchema {
   }
 }
 
-let dbPromise: Promise<IDBPDatabase<CatchupDB>> | null = null
+let dbPromise: Promise<IDBPDatabase<KetchupDB>> | null = null
 
 function db() {
   if (!dbPromise) {
-    dbPromise = openDB<CatchupDB>('trakt-catchup', 1, {
+    dbPromise = openDB<KetchupDB>('trakt-catchup', 1, {
       upgrade(database) {
         database.createObjectStore('watched', { keyPath: 'key' })
         database.createObjectStore('skips', { keyPath: 'key' })
@@ -52,6 +52,12 @@ export async function markWatchedLocal(type: MediaType, traktId: number) {
   await d.put('watched', { key: keyOf(type, traktId), type, traktId, addedAt: Date.now() })
 }
 
+/** Undo an optimistic local watched mark (used by go-back). */
+export async function markUnwatchedLocal(type: MediaType, traktId: number) {
+  const d = await db()
+  await d.delete('watched', keyOf(type, traktId))
+}
+
 /** Bulk-load the watched cache from a Trakt sync, replacing what we have. */
 export async function replaceWatchedCache(entries: Array<{ type: MediaType; traktId: number }>) {
   const d = await db()
@@ -71,6 +77,12 @@ const SKIP_TTL_MS = 1000 * 60 * 60 * 24 * 180 // 180 days
 export async function recordSkip(type: MediaType, traktId: number, now: number) {
   const d = await db()
   await d.put('skips', { key: keyOf(type, traktId), type, traktId, expiresAt: now + SKIP_TTL_MS })
+}
+
+/** Undo a skip-memory entry (used by go-back). */
+export async function removeSkip(type: MediaType, traktId: number) {
+  const d = await db()
+  await d.delete('skips', keyOf(type, traktId))
 }
 
 /** Keys that are currently suppressed (skipped and not yet expired). */
