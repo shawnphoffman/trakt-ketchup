@@ -13,12 +13,18 @@ export class WatchedQueue {
   private timer: ReturnType<typeof setTimeout> | null = null
   private inFlight: Promise<void> | null = null
 
-  constructor() {
+  /** @param onChange notified with the pending count whenever it changes
+   *  (enqueue, undo, flush, or a failed flush re-queue) so the UI can track it. */
+  constructor(private onChange?: (pendingCount: number) => void) {
     // Flush whatever is buffered before the tab goes away.
     window.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') void this.flush()
     })
     window.addEventListener('beforeunload', () => void this.flush())
+  }
+
+  private emit() {
+    this.onChange?.(this.pending.length)
   }
 
   /**
@@ -28,6 +34,7 @@ export class WatchedQueue {
   async enqueue(item: FeedItem, mode: WatchedAt) {
     await markWatchedLocal(item.type, item.media.ids.trakt)
     this.pending.push({ item, mode })
+    this.emit()
 
     if (this.pending.length >= MAX_BATCH) {
       void this.flush()
@@ -51,6 +58,7 @@ export class WatchedQueue {
       const p = this.pending[i]
       if (p.item.type === item.type && p.item.media.ids.trakt === item.media.ids.trakt) {
         this.pending.splice(i, 1)
+        this.emit()
         return true
       }
     }
@@ -67,6 +75,7 @@ export class WatchedQueue {
 
     const batch = this.pending
     this.pending = []
+    this.emit() // optimistically clear the count; restored below if the send fails
 
     this.inFlight = this.send(batch).finally(() => {
       this.inFlight = null
@@ -85,6 +94,7 @@ export class WatchedQueue {
       // Re-queue on failure so the items aren't silently lost.
       console.error('Batch flush failed, re-queueing', err)
       this.pending.unshift(...batch)
+      this.emit()
       throw err
     }
   }

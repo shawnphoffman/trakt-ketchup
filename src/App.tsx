@@ -63,7 +63,7 @@ export default function App() {
         await feed.init()
         if (cancelled) return
         feedRef.current = feed
-        queueRef.current = new WatchedQueue()
+        queueRef.current = new WatchedQueue(setPending)
         setCurrent(await feed.next())
         setPhase('ready')
       } catch (e) {
@@ -101,7 +101,6 @@ export default function App() {
     if (!item || !feedRef.current || !queueRef.current) return
     feedRef.current.exclude(item.type, item.media.ids.trakt)
     await queueRef.current.enqueue(item, settings.watchMode)
-    setPending(queueRef.current.pendingCount)
     historyRef.current.push({ kind: 'watched', item, mode: settings.watchMode })
     setCanGoBack(true)
     await advance()
@@ -136,7 +135,6 @@ export default function App() {
     } else {
       const queue = queueRef.current
       const stillPending = queue?.unqueue(last.item) ?? false
-      if (queue) setPending(queue.pendingCount)
       await markUnwatchedLocal(last.item.type, last.item.media.ids.trakt)
       // If it already flushed to Trakt, remove it there too.
       if (!stillPending) {
