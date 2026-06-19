@@ -100,6 +100,10 @@ export default function App() {
   useEffect(() => {
     if (phase !== 'ready') return
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowSettings(false)
+        return
+      }
       if (showSettings) return
       if (e.key === 'j' || e.key === 'ArrowLeft') {
         e.preventDefault()
@@ -136,17 +140,29 @@ export default function App() {
   return (
     <div className="app">
       <Backdrop item={current} />
-      <header className="topbar">
-        <strong>Trakt Catchup</strong>
-        <div className="topbar-right">
+      <div className="brand">
+        <span className="brand-title">
+          Trakt <span className="accent">Ketchup</span>
+        </span>
+        <div className="brand-right">
           {pending > 0 && <span className="pending">{pending} queued</span>}
-          <button className="btn btn-ghost" onClick={() => setShowSettings((s) => !s)}>
-            Settings
+          <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
+            <GearIcon />
           </button>
         </div>
-      </header>
+      </div>
 
-      {showSettings && (
+      <div
+        className={`drawer-scrim ${showSettings ? 'open' : ''}`}
+        onClick={() => setShowSettings(false)}
+      />
+      <aside className={`drawer ${showSettings ? 'open' : ''}`} aria-hidden={!showSettings}>
+        <div className="drawer-head">
+          <h2>Settings</h2>
+          <button className="icon-btn" onClick={() => setShowSettings(false)} aria-label="Close settings">
+            ✕
+          </button>
+        </div>
         <SettingsPanel
           settings={settings}
           onChange={updateSettings}
@@ -155,7 +171,7 @@ export default function App() {
             location.reload()
           }}
         />
-      )}
+      </aside>
 
       <main className="stage">
         {current ? (
@@ -208,6 +224,23 @@ function Backdrop({ item }: { item: FeedItem | null }) {
       )}
       <div className="backdrop-scrim" />
     </div>
+  )
+}
+
+function GearIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
   )
 }
 
