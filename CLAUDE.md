@@ -1,4 +1,4 @@
-# Trakt Catchup — project context
+# Trakt Ketchup — project context
 
 A fast, dead-simple web app for backfilling your Trakt watch history: shows one
 popular movie/show at a time, you tap **Watched** or **Skip**. Goal is to get

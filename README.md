@@ -1,4 +1,4 @@
-# Trakt Catchup
+# Trakt Ketchup
 
 A dead-simple, fast web app for backfilling your Trakt watch history. It shows
 you one popular movie or show at a time and you tap **Watched** or **Skip**. The

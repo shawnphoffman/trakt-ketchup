@@ -47,7 +47,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       'Content-Type': 'application/json',
       // Cloudflare (in front of api.trakt.tv) 403s server-side requests with no
       // User-Agent. Node's fetch omits it, so set one explicitly.
-      'User-Agent': 'trakt-catchup/0.1.0',
+      'User-Agent': 'trakt-ketchup/0.1.0',
       'trakt-api-version': '2',
       'trakt-api-key': clientId,
     },
