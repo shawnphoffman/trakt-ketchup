@@ -91,7 +91,21 @@ export class Feed {
       if (this.seen.has(key) || this.excluded.has(key)) continue
       this.seen.add(key)
       this.buffer.push(item)
+      // Warm the browser cache for upcoming art so cards don't flash on advance.
+      preloadImages(item)
     }
+  }
+}
+
+const preloaded = new Set<string>()
+
+/** Kick off background image loads (held in cache) for an upcoming card. */
+function preloadImages(item: FeedItem) {
+  for (const url of [item.backdrop, item.poster]) {
+    if (!url || preloaded.has(url)) continue
+    preloaded.add(url)
+    const img = new Image()
+    img.src = url
   }
 }
 

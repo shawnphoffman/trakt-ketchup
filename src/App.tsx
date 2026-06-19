@@ -6,6 +6,7 @@ import { Feed } from './lib/feed'
 import { WatchedQueue } from './lib/queue'
 import { loadSettings, saveSettings, type Settings } from './lib/settings'
 import { getWatchedMovieIds, getWatchedShowIds, type FeedItem } from './lib/trakt'
+import { gradientFor } from './lib/visual'
 
 type Phase = 'loading' | 'need-config' | 'connect' | 'ready' | 'error'
 
@@ -134,6 +135,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <Backdrop item={current} />
       <header className="topbar">
         <strong>Trakt Catchup</strong>
         <div className="topbar-right">
@@ -190,6 +192,23 @@ async function syncWatchedCache() {
   ]
   await replaceWatchedCache(entries)
   await setMeta('watchedSyncedAt', Date.now())
+}
+
+/** Full-viewport ambient background: the current title's blurred backdrop over
+ *  its gradient. Re-keyed per image so each new card crossfades in. */
+function Backdrop({ item }: { item: FeedItem | null }) {
+  return (
+    <div className="backdrop" style={{ background: gradientFor(item?.media.title ?? '') }}>
+      {item?.backdrop && (
+        <div
+          key={item.backdrop}
+          className="backdrop-img"
+          style={{ backgroundImage: `url(${item.backdrop})` }}
+        />
+      )}
+      <div className="backdrop-scrim" />
+    </div>
+  )
 }
 
 function Centered({ children }: { children: React.ReactNode }) {

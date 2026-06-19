@@ -15,6 +15,21 @@ export interface TraktIds {
   imdb?: string
 }
 
+/**
+ * Image URLs returned by Trakt with `extended=images`. Each is an array of
+ * protocol-less host/path strings (e.g. "walter-r2.trakt.tv/images/..."), so
+ * they must be prefixed with https://. Availability varies by app tier; we
+ * fall back to a generated gradient whenever a kind is missing.
+ */
+export interface TraktImages {
+  fanart?: string[]
+  poster?: string[]
+  logo?: string[]
+  clearart?: string[]
+  banner?: string[]
+  thumb?: string[]
+}
+
 export interface TraktMedia {
   title: string
   year: number | null
@@ -23,12 +38,34 @@ export interface TraktMedia {
   genres?: string[]
   /** Present on shows with extended=full: "ended" | "returning series" | "canceled" | ... */
   status?: string
+  /** Present with extended=images. */
+  images?: TraktImages
 }
 
-/** A single card in the feed. */
+/** A single card in the feed, with image URLs resolved up front. */
 export interface FeedItem {
   type: MediaType
   media: TraktMedia
+  /** Portrait poster, https-normalized; undefined → use a gradient fallback. */
+  poster?: string
+  /** Landscape backdrop (fanart) for the ambient background. */
+  backdrop?: string
+}
+
+/** Take the first usable URL from a Trakt image array and ensure it has a scheme. */
+function imageUrl(arr?: string[]): string | undefined {
+  const u = arr?.find(Boolean)
+  if (!u) return undefined
+  return /^https?:\/\//.test(u) ? u : `https://${u}`
+}
+
+function toFeedItem(type: MediaType, media: TraktMedia): FeedItem {
+  return {
+    type,
+    media,
+    poster: imageUrl(media.images?.poster),
+    backdrop: imageUrl(media.images?.fanart),
+  }
 }
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -58,13 +95,13 @@ type WatchedMovieRow = { movie: TraktMedia }
 type WatchedShowRow = { show: TraktMedia }
 
 export async function getMostWatchedMovies(page: number, limit = 20): Promise<FeedItem[]> {
-  const rows = await api<WatchedMovieRow[]>(`/movies/watched/all?extended=full&page=${page}&limit=${limit}`)
-  return rows.map((r) => ({ type: 'movie' as const, media: r.movie }))
+  const rows = await api<WatchedMovieRow[]>(`/movies/watched/all?extended=full,images&page=${page}&limit=${limit}`)
+  return rows.map((r) => toFeedItem('movie', r.movie))
 }
 
 export async function getMostWatchedShows(page: number, limit = 20): Promise<FeedItem[]> {
-  const rows = await api<WatchedShowRow[]>(`/shows/watched/all?extended=full&page=${page}&limit=${limit}`)
-  return rows.map((r) => ({ type: 'show' as const, media: r.show }))
+  const rows = await api<WatchedShowRow[]>(`/shows/watched/all?extended=full,images&page=${page}&limit=${limit}`)
+  return rows.map((r) => toFeedItem('show', r.show))
 }
 
 // ---- watched history (for the exclusion cache) -----------------------------
