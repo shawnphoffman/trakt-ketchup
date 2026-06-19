@@ -145,7 +145,15 @@ export default function App() {
           Trakt <span className="accent">Ketchup</span>
         </span>
         <div className="brand-right">
-          {pending > 0 && <span className="pending">{pending} queued</span>}
+          {pending > 0 && (
+            <span
+              className="queue-chip"
+              title={`${pending} mark${pending === 1 ? '' : 's'} waiting to sync`}
+            >
+              <span className="queue-dot" />
+              {pending} queued
+            </span>
+          )}
           <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
             <GearIcon />
           </button>

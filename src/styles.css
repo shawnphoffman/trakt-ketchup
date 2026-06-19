@@ -99,9 +99,27 @@ body {
   gap: 14px;
 }
 
-.pending {
-  font-size: clamp(0.8rem, 1vw, 0.95rem);
+.queue-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: clamp(0.78rem, 0.95vw, 0.9rem);
   color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 12px;
+  border-radius: 999px;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  white-space: nowrap;
+}
+
+.queue-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e8b339;
+  box-shadow: 0 0 8px rgba(232, 179, 57, 0.6);
 }
 
 .icon-btn {
