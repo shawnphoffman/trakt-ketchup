@@ -230,7 +230,7 @@ body {
   gap: clamp(14px, 2vw, 24px);
   /* Definite width: a % width here would collapse to 0 inside the column flex
      stage (align-items: center makes the cross size indefinite). */
-  width: min(680px, 92vw);
+  width: min(760px, 94vw);
 }
 
 /* Equal-width action buttons (scoped so the single Connect button is unaffected). */
@@ -258,16 +258,18 @@ body {
 }
 
 .btn.big {
-  font-size: clamp(1.05rem, 1.7vw, 1.6rem);
-  font-weight: 700;
-  padding: clamp(16px, 1.8vw, 26px) clamp(24px, 3vw, 44px);
-  border-radius: 18px;
+  font-size: clamp(1.2rem, 2vw, 1.95rem);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: clamp(22px, 2.6vw, 38px) clamp(28px, 3.5vw, 52px);
+  border-radius: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 14px;
   box-shadow:
-    0 14px 40px rgba(0, 0, 0, 0.4),
+    0 18px 50px rgba(0, 0, 0, 0.45),
     inset 0 1px 0 rgba(255, 255, 255, 0.18);
 }
 

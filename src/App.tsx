@@ -163,11 +163,11 @@ export default function App() {
             <Card item={current} />
             <div className="actions">
               <button className="btn btn-skip big" onClick={() => void onSkip()}>
-                Haven't Seen
+                Not Watched
                 <kbd>J</kbd>
               </button>
               <button className="btn btn-watched big" onClick={() => void onWatched()}>
-                Seen It
+                Watched It
                 <kbd>K</kbd>
               </button>
             </div>
