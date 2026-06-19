@@ -6,7 +6,7 @@ import { markWatchedLocal } from './db'
 import { addToHistory, buildHistoryPayload, type FeedItem, type HistoryPayload, type WatchedAt } from './trakt'
 
 const MAX_BATCH = 25
-const DEBOUNCE_MS = 2500
+const DEBOUNCE_MS = 5000
 
 export class WatchedQueue {
   private pending: { item: FeedItem; mode: WatchedAt }[] = []
