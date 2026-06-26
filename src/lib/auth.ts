@@ -5,6 +5,10 @@
 const CLIENT_ID = import.meta.env.VITE_TRAKT_CLIENT_ID as string
 const REDIRECT_URI = import.meta.env.VITE_TRAKT_REDIRECT_URI as string
 const STORAGE_KEY = 'trakt.tokens'
+// CSRF guard for the OAuth round-trip: a random value we send to Trakt and
+// require back on the callback, so a forged ?code= callback can't connect a
+// victim's session to someone else's Trakt account.
+const STATE_KEY = 'trakt.oauth_state'
 
 export interface Tokens {
   access_token: string
@@ -41,12 +45,21 @@ function toTokens(r: TokenResponse): Tokens {
   }
 }
 
+function randomState(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 /** Kick off the redirect to Trakt's authorize page. */
 export function beginLogin() {
+  const state = randomState()
+  sessionStorage.setItem(STATE_KEY, state)
   const url = new URL('https://trakt.tv/oauth/authorize')
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('client_id', CLIENT_ID)
   url.searchParams.set('redirect_uri', REDIRECT_URI)
+  url.searchParams.set('state', state)
   window.location.href = url.toString()
 }
 
@@ -64,6 +77,17 @@ export function completeLoginIfRedirected(): Promise<Tokens | null> {
   if (!code) return Promise.resolve(null)
 
   exchangeInFlight = (async () => {
+    // Verify the CSRF state before spending the single-use code. The check is
+    // inside the deduped promise so StrictMode's double-invoke (which would
+    // otherwise consume the stored state on the first run and fail the second)
+    // shares one result.
+    const returnedState = params.get('state')
+    const expectedState = sessionStorage.getItem(STATE_KEY)
+    sessionStorage.removeItem(STATE_KEY)
+    if (!expectedState || returnedState !== expectedState) {
+      throw new Error('OAuth state mismatch (possible CSRF). Please connect again.')
+    }
+
     const res = await fetch('/api/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

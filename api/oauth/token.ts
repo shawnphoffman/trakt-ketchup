@@ -10,9 +10,73 @@ import type { VercelRequest, VercelResponse } from '@vercel/node'
 
 const TRAKT_TOKEN_URL = 'https://api.trakt.tv/oauth/token'
 
+// Origins allowed to use this proxy. Derived from the app's own redirect URI,
+// plus an optional ALLOWED_ORIGINS override (comma-separated) and localhost for
+// dev. Locking this down stops third parties / scripts from burning our Trakt
+// app's rate limit and function quota through our credentials.
+function allowedOrigins(): Set<string> {
+  const origins = new Set<string>(['http://localhost:3000', 'http://127.0.0.1:3000'])
+  const redirect = process.env.VITE_TRAKT_REDIRECT_URI
+  if (redirect) {
+    try {
+      origins.add(new URL(redirect).origin)
+    } catch {
+      // ignore an unparseable redirect URI
+    }
+  }
+  for (const o of (process.env.ALLOWED_ORIGINS ?? '').split(',')) {
+    const trimmed = o.trim()
+    if (trimmed) origins.add(trimmed)
+  }
+  return origins
+}
+
+// Best-effort per-IP rate limit. This is an in-memory fixed window that only
+// covers a single warm function instance (Vercel may run several), so it's a
+// speed bump against abuse, not a hard guarantee. Legit use is a couple of
+// token calls per login plus the occasional refresh, well under the cap.
+const RATE_LIMIT = 20 // requests
+const RATE_WINDOW_MS = 60_000 // per minute, per IP
+const hits = new Map<string, { count: number; resetAt: number }>()
+
+function clientIp(req: VercelRequest): string {
+  const fwd = req.headers['x-forwarded-for']
+  const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim()
+  return first || (req.headers['x-real-ip'] as string) || 'unknown'
+}
+
+/** Returns true if the caller is over the limit for the current window. */
+function rateLimited(ip: string): boolean {
+  const now = Date.now()
+  const entry = hits.get(ip)
+  if (!entry || now >= entry.resetAt) {
+    hits.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS })
+    // Opportunistically drop expired entries so the map can't grow unbounded.
+    if (hits.size > 5000) {
+      for (const [k, v] of hits) if (now >= v.resetAt) hits.delete(k)
+    }
+    return false
+  }
+  entry.count += 1
+  return entry.count > RATE_LIMIT
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
     res.status(405).json({ error: 'method_not_allowed' })
+    return
+  }
+
+  // Browsers always send Origin on POST; requiring it in the allowlist rejects
+  // both cross-site browser calls and credential-less scripted abuse (curl).
+  const origin = req.headers.origin
+  if (!origin || !allowedOrigins().has(origin)) {
+    res.status(403).json({ error: 'forbidden_origin' })
+    return
+  }
+
+  if (rateLimited(clientIp(req))) {
+    res.status(429).json({ error: 'rate_limited' })
     return
   }
 
