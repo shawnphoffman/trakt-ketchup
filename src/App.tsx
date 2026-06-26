@@ -5,6 +5,8 @@ import {
   getMeta,
   markUnwatchedLocal,
   markUnwatchlistLocal,
+  markWatchedLocal,
+  markWatchlistLocal,
   recordSkip,
   removeSkip,
   replaceWatchedCache,
@@ -112,6 +114,7 @@ export default function App() {
     const item = current
     if (!item || !feedRef.current || !queueRef.current) return
     feedRef.current.exclude(item.type, item.media.ids.trakt)
+    await markWatchedLocal(item.type, item.media.ids.trakt)
     await queueRef.current.enqueue(item, 'history', settings.watchMode)
     historyRef.current.push({ kind: 'watched', item, mode: settings.watchMode })
     setCanGoBack(true)
@@ -122,6 +125,7 @@ export default function App() {
     const item = current
     if (!item || !feedRef.current || !queueRef.current) return
     feedRef.current.exclude(item.type, item.media.ids.trakt)
+    await markWatchlistLocal(item.type, item.media.ids.trakt)
     await queueRef.current.enqueue(item, 'watchlist', settings.watchMode)
     historyRef.current.push({ kind: 'watchlist', item })
     setCanGoBack(true)
