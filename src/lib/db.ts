@@ -14,6 +14,10 @@ interface KetchupDB extends DBSchema {
     key: string
     value: { key: string; type: MediaType; traktId: number; addedAt: number }
   }
+  watchlist: {
+    key: string
+    value: { key: string; type: MediaType; traktId: number; addedAt: number }
+  }
   skips: {
     key: string
     // `expiresAt` is when the item becomes eligible to resurface.
@@ -29,11 +33,16 @@ let dbPromise: Promise<IDBPDatabase<KetchupDB>> | null = null
 
 function db() {
   if (!dbPromise) {
-    dbPromise = openDB<KetchupDB>('trakt-catchup', 1, {
-      upgrade(database) {
-        database.createObjectStore('watched', { keyPath: 'key' })
-        database.createObjectStore('skips', { keyPath: 'key' })
-        database.createObjectStore('meta')
+    dbPromise = openDB<KetchupDB>('trakt-catchup', 2, {
+      upgrade(database, oldVersion) {
+        if (oldVersion < 1) {
+          database.createObjectStore('watched', { keyPath: 'key' })
+          database.createObjectStore('skips', { keyPath: 'key' })
+          database.createObjectStore('meta')
+        }
+        if (oldVersion < 2) {
+          database.createObjectStore('watchlist', { keyPath: 'key' })
+        }
       },
     })
   }
@@ -62,6 +71,38 @@ export async function markUnwatchedLocal(type: MediaType, traktId: number) {
 export async function replaceWatchedCache(entries: Array<{ type: MediaType; traktId: number }>) {
   const d = await db()
   const tx = d.transaction('watched', 'readwrite')
+  await tx.store.clear()
+  const now = Date.now()
+  for (const e of entries) {
+    await tx.store.put({ key: keyOf(e.type, e.traktId), type: e.type, traktId: e.traktId, addedAt: now })
+  }
+  await tx.done
+}
+
+// ---- watchlist cache -------------------------------------------------------
+// Mirrors the watched cache: lets the feed exclude titles already on the user's
+// Trakt watchlist so they don't resurface.
+
+export async function getWatchlistKeys(): Promise<Set<string>> {
+  const all = await (await db()).getAllKeys('watchlist')
+  return new Set(all as string[])
+}
+
+export async function markWatchlistLocal(type: MediaType, traktId: number) {
+  const d = await db()
+  await d.put('watchlist', { key: keyOf(type, traktId), type, traktId, addedAt: Date.now() })
+}
+
+/** Undo an optimistic local watchlist mark (used by go-back). */
+export async function markUnwatchlistLocal(type: MediaType, traktId: number) {
+  const d = await db()
+  await d.delete('watchlist', keyOf(type, traktId))
+}
+
+/** Bulk-load the watchlist cache from a Trakt sync, replacing what we have. */
+export async function replaceWatchlistCache(entries: Array<{ type: MediaType; traktId: number }>) {
+  const d = await db()
+  const tx = d.transaction('watchlist', 'readwrite')
   await tx.store.clear()
   const now = Date.now()
   for (const e of entries) {

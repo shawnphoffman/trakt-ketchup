@@ -87,32 +87,62 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ---- discovery feed --------------------------------------------------------
 
-// "Most watched, all time" is the highest-yield source for backfilling a
-// watch history: these are the titles a user is most likely to have seen.
-// Returned items are wrapped: { watcher_count, movie | show }.
+// Where feed cards come from. "Most watched, all time" is the highest-yield
+// source for backfilling, but always returns the same list, so we offer other
+// wells and a "mix" that blends them for variety.
+export type FeedSource = 'mix' | 'watched' | 'popular' | 'trending' | 'recent'
+export type SingleSource = Exclude<FeedSource, 'mix'>
 
-type WatchedMovieRow = { movie: TraktMedia }
-type WatchedShowRow = { show: TraktMedia }
-
-export async function getMostWatchedMovies(page: number, limit = 20): Promise<FeedItem[]> {
-  const rows = await api<WatchedMovieRow[]>(`/movies/watched/all?extended=full,images&page=${page}&limit=${limit}`)
-  return rows.map((r) => toFeedItem('movie', r.movie))
+// `wrapped` sources return rows like { movie } / { show }; `popular` returns
+// bare media objects. All support extended=full,images and ?page=&limit=.
+const SOURCE_ENDPOINT: Record<SingleSource, { path: string; wrapped: boolean }> = {
+  watched: { path: 'watched/all', wrapped: true },
+  popular: { path: 'popular', wrapped: false },
+  trending: { path: 'trending', wrapped: true },
+  recent: { path: 'watched/monthly', wrapped: true },
 }
 
-export async function getMostWatchedShows(page: number, limit = 20): Promise<FeedItem[]> {
-  const rows = await api<WatchedShowRow[]>(`/shows/watched/all?extended=full,images&page=${page}&limit=${limit}`)
-  return rows.map((r) => toFeedItem('show', r.show))
+/** Sources blended (round-robin) when the user picks "mix". */
+export const MIX_SOURCES: SingleSource[] = ['watched', 'popular', 'trending', 'recent']
+
+export async function getFeedPage(
+  source: SingleSource,
+  type: MediaType,
+  page: number,
+  limit = 20,
+): Promise<FeedItem[]> {
+  const endpoint = SOURCE_ENDPOINT[source]
+  const plural = type === 'movie' ? 'movies' : 'shows'
+  const rows = await api<unknown[]>(`/${plural}/${endpoint.path}?extended=full,images&page=${page}&limit=${limit}`)
+  return rows.map((row) => {
+    const media = (endpoint.wrapped ? (row as Record<MediaType, TraktMedia>)[type] : row) as TraktMedia
+    return toFeedItem(type, media)
+  })
 }
 
-// ---- watched history (for the exclusion cache) -----------------------------
+// ---- watched history + watchlist (for the exclusion cache) -----------------
+
+// Rows from /sync/{watched,watchlist}/{movies,shows} are wrapped per type.
+type MovieRow = { movie: TraktMedia }
+type ShowRow = { show: TraktMedia }
 
 export async function getWatchedMovieIds(): Promise<number[]> {
-  const rows = await api<WatchedMovieRow[]>(`/sync/watched/movies`)
+  const rows = await api<MovieRow[]>(`/sync/watched/movies`)
   return rows.map((r) => r.movie.ids.trakt)
 }
 
 export async function getWatchedShowIds(): Promise<number[]> {
-  const rows = await api<WatchedShowRow[]>(`/sync/watched/shows`)
+  const rows = await api<ShowRow[]>(`/sync/watched/shows`)
+  return rows.map((r) => r.show.ids.trakt)
+}
+
+export async function getWatchlistMovieIds(): Promise<number[]> {
+  const rows = await api<MovieRow[]>(`/sync/watchlist/movies`)
+  return rows.map((r) => r.movie.ids.trakt)
+}
+
+export async function getWatchlistShowIds(): Promise<number[]> {
+  const rows = await api<ShowRow[]>(`/sync/watchlist/shows`)
   return rows.map((r) => r.show.ids.trakt)
 }
 
@@ -203,4 +233,20 @@ export async function addToHistory(payload: HistoryPayload): Promise<void> {
 export async function removeFromHistory(item: FeedItem, mode: WatchedAt): Promise<void> {
   const payload = await buildHistoryPayload(item, mode)
   await api(`/sync/history/remove`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+// ---- watchlist -------------------------------------------------------------
+
+/** Whole movie/show: the watchlist has no date or season granularity. The
+ *  shape reuses HistoryPayload (watched_at is optional) so batches can merge. */
+export function buildWatchlistPayload(item: FeedItem): HistoryPayload {
+  return item.type === 'movie' ? { movies: [{ ids: item.media.ids }] } : { shows: [{ ids: item.media.ids }] }
+}
+
+export async function addToWatchlist(payload: HistoryPayload): Promise<void> {
+  await api(`/sync/watchlist`, { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export async function removeFromWatchlist(item: FeedItem): Promise<void> {
+  await api(`/sync/watchlist/remove`, { method: 'POST', body: JSON.stringify(buildWatchlistPayload(item)) })
 }

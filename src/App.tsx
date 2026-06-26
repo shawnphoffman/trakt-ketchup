@@ -4,16 +4,27 @@ import { beginLogin, clearTokens, completeLoginIfRedirected, loadTokens } from '
 import {
   getMeta,
   markUnwatchedLocal,
+  markUnwatchlistLocal,
   recordSkip,
   removeSkip,
   replaceWatchedCache,
+  replaceWatchlistCache,
   setMeta,
   type MediaType,
 } from './lib/db'
 import { Feed } from './lib/feed'
 import { WatchedQueue } from './lib/queue'
-import { loadSettings, saveSettings, type Settings } from './lib/settings'
-import { getWatchedMovieIds, getWatchedShowIds, removeFromHistory, type FeedItem, type WatchedAt } from './lib/trakt'
+import { loadSettings, saveSettings, type FeedSource, type Settings } from './lib/settings'
+import {
+  getWatchedMovieIds,
+  getWatchedShowIds,
+  getWatchlistMovieIds,
+  getWatchlistShowIds,
+  removeFromHistory,
+  removeFromWatchlist,
+  type FeedItem,
+  type WatchedAt,
+} from './lib/trakt'
 import { gradientFor } from './lib/visual'
 
 type Phase = 'loading' | 'need-config' | 'connect' | 'ready' | 'error'
@@ -22,6 +33,7 @@ type Phase = 'loading' | 'need-config' | 'connect' | 'ready' | 'error'
 type PastAction =
   | { kind: 'skip'; item: FeedItem }
   | { kind: 'watched'; item: FeedItem; mode: WatchedAt }
+  | { kind: 'watchlist'; item: FeedItem }
 
 const WATCHED_SYNC_TTL = 1000 * 60 * 60 * 6 // re-sync the watched cache every 6h
 
@@ -58,8 +70,8 @@ export default function App() {
           setPhase('connect')
           return
         }
-        await syncWatchedCache()
-        const feed = new Feed(settings.filter)
+        await syncExclusionCaches()
+        const feed = new Feed(settings.filter, settings.source)
         await feed.init()
         if (cancelled) return
         feedRef.current = feed
@@ -77,12 +89,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Rebuild the feed when the media filter changes.
+  // Rebuild the feed when the media filter or source changes.
   useEffect(() => {
     if (phase !== 'ready') return
     let cancelled = false
     ;(async () => {
-      const feed = new Feed(settings.filter)
+      const feed = new Feed(settings.filter, settings.source)
       await feed.init()
       if (cancelled) return
       feedRef.current = feed
@@ -94,14 +106,24 @@ export default function App() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.filter])
+  }, [settings.filter, settings.source])
 
   const onWatched = useCallback(async () => {
     const item = current
     if (!item || !feedRef.current || !queueRef.current) return
     feedRef.current.exclude(item.type, item.media.ids.trakt)
-    await queueRef.current.enqueue(item, settings.watchMode)
+    await queueRef.current.enqueue(item, 'history', settings.watchMode)
     historyRef.current.push({ kind: 'watched', item, mode: settings.watchMode })
+    setCanGoBack(true)
+    await advance()
+  }, [current, settings.watchMode, advance])
+
+  const onWatchlist = useCallback(async () => {
+    const item = current
+    if (!item || !feedRef.current || !queueRef.current) return
+    feedRef.current.exclude(item.type, item.media.ids.trakt)
+    await queueRef.current.enqueue(item, 'watchlist', settings.watchMode)
+    historyRef.current.push({ kind: 'watchlist', item })
     setCanGoBack(true)
     await advance()
   }, [current, settings.watchMode, advance])
@@ -132,16 +154,29 @@ export default function App() {
 
     if (last.kind === 'skip') {
       await removeSkip(last.item.type, last.item.media.ids.trakt)
-    } else {
-      const queue = queueRef.current
-      const stillPending = queue?.unqueue(last.item) ?? false
+      return
+    }
+
+    // watched / watchlist: pull it back from the queue if it hasn't flushed yet,
+    // otherwise undo it on Trakt. Either way, clear the optimistic local cache.
+    const queue = queueRef.current
+    const stillPending = queue?.unqueue(last.item) ?? false
+    if (last.kind === 'watched') {
       await markUnwatchedLocal(last.item.type, last.item.media.ids.trakt)
-      // If it already flushed to Trakt, remove it there too.
       if (!stillPending) {
         try {
           await removeFromHistory(last.item, last.mode)
         } catch (e) {
           console.error('Go-back: failed to remove from Trakt history', e)
+        }
+      }
+    } else {
+      await markUnwatchlistLocal(last.item.type, last.item.media.ids.trakt)
+      if (!stillPending) {
+        try {
+          await removeFromWatchlist(last.item)
+        } catch (e) {
+          console.error('Go-back: failed to remove from Trakt watchlist', e)
         }
       }
     }
@@ -162,6 +197,9 @@ export default function App() {
       } else if (e.key === 'k' || e.key === 'ArrowRight' || e.key === ' ') {
         e.preventDefault()
         void onWatched()
+      } else if (e.key === 'w' || e.key === 'W') {
+        e.preventDefault()
+        void onWatchlist()
       } else if (e.key === 'Backspace' || e.key === 'u' || e.key === 'U') {
         e.preventDefault()
         void goBack()
@@ -169,7 +207,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [phase, showSettings, onSkip, onWatched, goBack])
+  }, [phase, showSettings, onSkip, onWatched, onWatchlist, goBack])
 
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((prev) => {
@@ -241,14 +279,20 @@ export default function App() {
         {current ? (
           <>
             <Card item={current} />
-            <div className="actions">
-              <button className="btn btn-skip big" onClick={() => void onSkip()}>
-                Not Watched
-                <kbd>J</kbd>
-              </button>
-              <button className="btn btn-watched big" onClick={() => void onWatched()}>
-                Watched It
-                <kbd>K</kbd>
+            <div className="action-group">
+              <div className="actions">
+                <button className="btn btn-skip big" onClick={() => void onSkip()}>
+                  Not Watched
+                  <kbd>J</kbd>
+                </button>
+                <button className="btn btn-watched big" onClick={() => void onWatched()}>
+                  Watched It
+                  <kbd>K</kbd>
+                </button>
+              </div>
+              <button className="btn btn-watchlist watchlist-btn" onClick={() => void onWatchlist()}>
+                Watchlist
+                <kbd>W</kbd>
               </button>
             </div>
           </>
@@ -326,18 +370,22 @@ function Connect() {
   )
 }
 
-/** Pull the user's full watched history into the IndexedDB exclusion cache. */
-async function syncWatchedCache() {
-  const last = (await getMeta<number>('watchedSyncedAt')) ?? 0
+/** Pull the user's watched history and watchlist into the IndexedDB exclusion
+ *  caches so the feed never resurfaces a title they've seen or already saved. */
+async function syncExclusionCaches() {
+  const last = (await getMeta<number>('exclusionsSyncedAt')) ?? 0
   if (Date.now() - last < WATCHED_SYNC_TTL) return
 
-  const [movieIds, showIds] = await Promise.all([getWatchedMovieIds(), getWatchedShowIds()])
-  const entries: Array<{ type: MediaType; traktId: number }> = [
-    ...movieIds.map((id) => ({ type: 'movie' as const, traktId: id })),
-    ...showIds.map((id) => ({ type: 'show' as const, traktId: id })),
-  ]
-  await replaceWatchedCache(entries)
-  await setMeta('watchedSyncedAt', Date.now())
+  const [movieIds, showIds, wlMovieIds, wlShowIds] = await Promise.all([
+    getWatchedMovieIds(),
+    getWatchedShowIds(),
+    getWatchlistMovieIds(),
+    getWatchlistShowIds(),
+  ])
+  const entries = (ids: number[], type: MediaType) => ids.map((id) => ({ type, traktId: id }))
+  await replaceWatchedCache([...entries(movieIds, 'movie'), ...entries(showIds, 'show')])
+  await replaceWatchlistCache([...entries(wlMovieIds, 'movie'), ...entries(wlShowIds, 'show')])
+  await setMeta('exclusionsSyncedAt', Date.now())
 }
 
 /** Full-viewport ambient background: the current title's blurred backdrop over
@@ -422,6 +470,20 @@ function SettingsPanel({
 }) {
   return (
     <div className="settings-panel">
+      <div className="setting">
+        <span>Source</span>
+        <select
+          className="select"
+          value={settings.source}
+          onChange={(e) => onChange({ source: e.target.value as FeedSource })}
+        >
+          <option value="mix">Surprise mix</option>
+          <option value="watched">Most watched (all time)</option>
+          <option value="popular">Popular</option>
+          <option value="trending">Trending now</option>
+          <option value="recent">Most watched this month</option>
+        </select>
+      </div>
       <div className="setting">
         <span>Show</span>
         <div className="segmented">

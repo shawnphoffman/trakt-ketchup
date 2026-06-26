@@ -15,13 +15,18 @@ become accurate. See [README.md](README.md) for architecture and setup.
 
 ## Locked design decisions
 
-- **Feed = high-yield backfill:** pull Trakt's "most watched of all time" lists
-  (movies + shows), because those are the titles the user most likely already
-  saw. Personalized recs are deliberately not used (weak until history is built).
-- **Never repeat:** hard-exclude anything already in Trakt history; suppress
-  skipped items for ~180 days (skip-memory).
-- **Storage:** IndexedDB for the watched-exclusion cache + skip-memory
-  (`src/lib/db.ts`); localStorage for OAuth tokens + settings.
+- **Feed = high-yield backfill:** default source is a "mix" that round-robins
+  several Trakt wells (most-watched all-time, popular, trending, watched-monthly)
+  for variety; the user can also pin a single source. See `getFeedPage` /
+  `MIX_SOURCES` in `src/lib/trakt.ts` and the round-robin in `src/lib/feed.ts`.
+  Personalized recs are deliberately not used (weak until history is built).
+- **Never repeat:** hard-exclude anything already in Trakt history OR on the
+  user's Trakt watchlist; suppress skipped items for ~180 days (skip-memory).
+- **Watchlist action:** a third button (`W`) adds a title to the Trakt watchlist
+  for stuff not seen but wanted. Routes through the same batched queue, excluded
+  from the feed like watched, undoable via go-back (`removeFromWatchlist`).
+- **Storage:** IndexedDB for the watched + watchlist exclusion caches and
+  skip-memory (`src/lib/db.ts`, DB v2); localStorage for OAuth tokens + settings.
 - **Watched-date setting:** `unknown` (default) vs `released`. `unknown` sends the
   Unix-epoch sentinel `1970-01-01T00:00:00.000Z` (Trakt renders epoch as "unknown
   date"); `released` sends `watched_at: "released"`. See `stampFor()` in
@@ -30,11 +35,14 @@ become accurate. See [README.md](README.md) for architecture and setup.
   ongoing series → mark only aired seasons/episodes. See `buildHistoryPayload()`.
 - **Not-watched (Skip):** records nothing on Trakt; only advances + adds to
   skip-memory.
-- **Writes are batched:** queue marks and flush together to `/sync/history`
-  (`src/lib/queue.ts`), not one request per tap. Optimistic local update so the
-  feed never resurfaces a just-marked item.
-- **UX:** one big card, big Watched/Skip buttons, keyboard nav (`J`/`←` skip,
-  `K`/`→`/`Space` watched), prefetch-ahead feed so the UI never waits.
+- **Writes are batched:** queue marks and flush together (`src/lib/queue.ts`),
+  not one request per tap. The queue carries an action (`history` → `/sync/history`,
+  `watchlist` → `/sync/watchlist`) and sends each group as its own request so one
+  failing group doesn't re-queue (and duplicate) the other. Optimistic local
+  update so the feed never resurfaces a just-marked item.
+- **UX:** one big card, big Skip/Watchlist/Watched buttons, keyboard nav
+  (`J`/`←` skip, `W` watchlist, `K`/`→`/`Space` watched, `Backspace` undo),
+  prefetch-ahead feed so the UI never waits.
 
 ## Stack
 

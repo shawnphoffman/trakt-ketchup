@@ -1,15 +1,32 @@
-// Batched write queue for marking items watched. Instead of hammering
-// /sync/history once per tap, we buffer items and flush them together
-// (on a debounce, when the batch is large, or when the page is hidden).
+// Batched write queue for marking items. Instead of hammering Trakt once per
+// tap, we buffer items and flush them together (on a debounce, when the batch
+// is large, or when the page is hidden). Handles two actions: marking watched
+// (-> /sync/history) and adding to the watchlist (-> /sync/watchlist).
 
-import { markWatchedLocal } from './db'
-import { addToHistory, buildHistoryPayload, type FeedItem, type HistoryPayload, type WatchedAt } from './trakt'
+import { markWatchedLocal, markWatchlistLocal } from './db'
+import {
+  addToHistory,
+  addToWatchlist,
+  buildHistoryPayload,
+  buildWatchlistPayload,
+  type FeedItem,
+  type HistoryPayload,
+  type WatchedAt,
+} from './trakt'
 
 const MAX_BATCH = 25
 const DEBOUNCE_MS = 5000
 
+export type QueueAction = 'history' | 'watchlist'
+
+interface PendingItem {
+  item: FeedItem
+  action: QueueAction
+  mode: WatchedAt
+}
+
 export class WatchedQueue {
-  private pending: { item: FeedItem; mode: WatchedAt }[] = []
+  private pending: PendingItem[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   private inFlight: Promise<void> | null = null
 
@@ -28,12 +45,14 @@ export class WatchedQueue {
   }
 
   /**
-   * Enqueue an item to be marked watched. Updates the local cache immediately
-   * (optimistic) so the feed won't resurface it even before the flush lands.
+   * Enqueue an item. Updates the matching local cache immediately (optimistic)
+   * so the feed won't resurface it even before the flush lands. `mode` is only
+   * used by the history action.
    */
-  async enqueue(item: FeedItem, mode: WatchedAt) {
-    await markWatchedLocal(item.type, item.media.ids.trakt)
-    this.pending.push({ item, mode })
+  async enqueue(item: FeedItem, action: QueueAction, mode: WatchedAt) {
+    if (action === 'history') await markWatchedLocal(item.type, item.media.ids.trakt)
+    else await markWatchlistLocal(item.type, item.media.ids.trakt)
+    this.pending.push({ item, action, mode })
     this.emit()
 
     if (this.pending.length >= MAX_BATCH) {
@@ -83,19 +102,45 @@ export class WatchedQueue {
     return this.inFlight
   }
 
-  private async send(batch: { item: FeedItem; mode: WatchedAt }[]) {
-    // Build per-item payloads (ongoing shows need an async season fetch),
-    // then merge into a single /sync/history request.
-    const payloads = await Promise.all(batch.map((b) => buildHistoryPayload(b.item, b.mode)))
-    const merged = mergePayloads(payloads)
-    try {
-      await addToHistory(merged)
-    } catch (err) {
-      // Re-queue on failure so the items aren't silently lost.
-      console.error('Batch flush failed, re-queueing', err)
-      this.pending.unshift(...batch)
+  private async send(batch: PendingItem[]) {
+    // Each action is its own Trakt request. Send them independently so a failure
+    // in one doesn't re-queue (and thus duplicate) the items that already landed.
+    const history = batch.filter((b) => b.action === 'history')
+    const watchlist = batch.filter((b) => b.action === 'watchlist')
+    const groups: Array<{ items: PendingItem[]; run: () => Promise<void> }> = [
+      {
+        items: history,
+        run: async () => {
+          const payloads = await Promise.all(history.map((b) => buildHistoryPayload(b.item, b.mode)))
+          await addToHistory(mergePayloads(payloads))
+        },
+      },
+      {
+        items: watchlist,
+        run: async () => {
+          await addToWatchlist(mergePayloads(watchlist.map((b) => buildWatchlistPayload(b.item))))
+        },
+      },
+    ]
+
+    const failed: PendingItem[] = []
+    let firstError: unknown
+    for (const group of groups) {
+      if (group.items.length === 0) continue
+      try {
+        await group.run()
+      } catch (err) {
+        firstError ??= err
+        failed.push(...group.items)
+      }
+    }
+
+    if (failed.length) {
+      // Re-queue only what failed so the items aren't silently lost.
+      console.error('Batch flush failed, re-queueing', firstError)
+      this.pending.unshift(...failed)
       this.emit()
-      throw err
+      throw firstError
     }
   }
 }

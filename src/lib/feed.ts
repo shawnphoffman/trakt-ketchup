@@ -1,9 +1,13 @@
 // Feed engine: keeps a buffer of upcoming cards filled by prefetching pages
-// from Trakt's "most watched" lists, filtering out anything already watched
-// or currently suppressed by the skip-memory. Designed so the UI never waits.
+// from Trakt, filtering out anything already watched, watchlisted, or currently
+// suppressed by the skip-memory. Designed so the UI never waits.
+//
+// A single source (e.g. "popular") pages straight through. The "mix" source
+// round-robins across several wells (MIX_SOURCES) so the feed surfaces
+// different kinds of titles instead of the same all-time list every session.
 
-import { getActiveSkipKeys, getWatchedKeys, keyOf, type MediaType } from './db'
-import { getMostWatchedMovies, getMostWatchedShows, type FeedItem } from './trakt'
+import { getActiveSkipKeys, getWatchedKeys, getWatchlistKeys, keyOf, type MediaType } from './db'
+import { getFeedPage, MIX_SOURCES, type FeedItem, type FeedSource, type SingleSource } from './trakt'
 import type { MediaFilter } from './settings'
 
 const REFILL_THRESHOLD = 5 // refetch when fewer than this remain
@@ -11,18 +15,26 @@ const PAGE_SIZE = 20
 
 export class Feed {
   private buffer: FeedItem[] = []
-  private seen = new Set<string>() // dedupe across pages within a session
-  private excluded = new Set<string>() // watched + active skips
-  private pages: Record<MediaType, number> = { movie: 1, show: 1 }
-  private exhausted: Record<MediaType, boolean> = { movie: false, show: false }
+  private seen = new Set<string>() // dedupe across pages/sources within a session
+  private excluded = new Set<string>() // watched + watchlisted + active skips
+  private pages = new Map<string, number>() // "source:type" -> next page
+  private exhausted = new Set<string>() // "source:type" that ran out
+  private rotation = 0 // round-robin cursor across sources (for "mix")
   private fetching: Promise<void> | null = null
 
-  constructor(private filter: MediaFilter) {}
+  constructor(
+    private filter: MediaFilter,
+    private source: FeedSource,
+  ) {}
 
-  /** Load the exclusion set (watched cache + active skips) before first use. */
+  /** Load the exclusion set before first use. */
   async init() {
-    const [watched, skips] = await Promise.all([getWatchedKeys(), getActiveSkipKeys(Date.now())])
-    this.excluded = new Set([...watched, ...skips])
+    const [watched, watchlist, skips] = await Promise.all([
+      getWatchedKeys(),
+      getWatchlistKeys(),
+      getActiveSkipKeys(Date.now()),
+    ])
+    this.excluded = new Set([...watched, ...watchlist, ...skips])
     await this.ensureFilled()
   }
 
@@ -55,15 +67,28 @@ export class Feed {
     this.excluded.delete(keyOf(type, traktId))
   }
 
-  private wantsMovies() {
-    return this.filter === 'movies' || this.filter === 'both'
+  private sources(): SingleSource[] {
+    return this.source === 'mix' ? MIX_SOURCES : [this.source]
   }
-  private wantsShows() {
-    return this.filter === 'shows' || this.filter === 'both'
+
+  private types(): MediaType[] {
+    const t: MediaType[] = []
+    if (this.filter === 'movies' || this.filter === 'both') t.push('movie')
+    if (this.filter === 'shows' || this.filter === 'both') t.push('show')
+    return t
+  }
+
+  private comboKey(source: SingleSource, type: MediaType): string {
+    return `${source}:${type}`
   }
 
   private allExhausted(): boolean {
-    return (!this.wantsMovies() || this.exhausted.movie) && (!this.wantsShows() || this.exhausted.show)
+    for (const source of this.sources()) {
+      for (const type of this.types()) {
+        if (!this.exhausted.has(this.comboKey(source, type))) return false
+      }
+    }
+    return true
   }
 
   private ensureFilled(): Promise<void> {
@@ -77,26 +102,36 @@ export class Feed {
   private async fill(): Promise<void> {
     if (this.buffer.length > REFILL_THRESHOLD || this.allExhausted()) return
 
-    const tasks: Promise<FeedItem[]>[] = []
-    if (this.wantsMovies() && !this.exhausted.movie) {
-      tasks.push(getMostWatchedMovies(this.pages.movie++, PAGE_SIZE))
+    // Pick the next source (round-robin) that still has an un-exhausted type.
+    const sources = this.sources()
+    const types = this.types()
+    let chosen: SingleSource | null = null
+    for (let i = 0; i < sources.length; i++) {
+      const source = sources[(this.rotation + i) % sources.length]
+      if (types.some((type) => !this.exhausted.has(this.comboKey(source, type)))) {
+        chosen = source
+        this.rotation = (this.rotation + i + 1) % sources.length
+        break
+      }
     }
-    if (this.wantsShows() && !this.exhausted.show) {
-      tasks.push(getMostWatchedShows(this.pages.show++, PAGE_SIZE))
-    }
+    if (!chosen) return
 
-    const results = await Promise.all(tasks)
-    let movieIdx = 0
-    if (this.wantsMovies() && !this.exhausted.movie) {
-      if (results[movieIdx].length < PAGE_SIZE) this.exhausted.movie = true
-      movieIdx++
-    }
-    if (this.wantsShows() && !this.exhausted.show) {
-      if (results[movieIdx].length < PAGE_SIZE) this.exhausted.show = true
-    }
+    // Fetch every wanted (non-exhausted) media type for that source in parallel.
+    const combos = types
+      .filter((type) => !this.exhausted.has(this.comboKey(chosen!, type)))
+      .map((type) => ({ type, key: this.comboKey(chosen!, type), page: this.pages.get(this.comboKey(chosen!, type)) ?? 1 }))
+    const results = await Promise.all(combos.map((c) => getFeedPage(chosen!, c.type, c.page, PAGE_SIZE)))
+
+    const lists: FeedItem[][] = []
+    results.forEach((items, idx) => {
+      const combo = combos[idx]
+      if (items.length < PAGE_SIZE) this.exhausted.add(combo.key)
+      this.pages.set(combo.key, combo.page + 1)
+      lists.push(items)
+    })
 
     // Interleave movie/show results so the feed feels mixed, then filter.
-    for (const item of interleave(results)) {
+    for (const item of interleave(lists)) {
       const key = keyOf(item.type, item.media.ids.trakt)
       if (this.seen.has(key) || this.excluded.has(key)) continue
       this.seen.add(key)

@@ -7,7 +7,7 @@ vi.mock('./auth', () => ({
   getValidAccessToken: vi.fn(async () => 'test-token'),
 }))
 
-import { buildHistoryPayload, type FeedItem } from './trakt'
+import { buildHistoryPayload, buildWatchlistPayload, type FeedItem } from './trakt'
 
 // The unknown-date sentinel is a hard rule: marking must send epoch-0, never
 // "now". Pin the literal so a regression here fails loudly.
@@ -79,6 +79,16 @@ describe('buildHistoryPayload', () => {
         ],
       })
     })
+  })
+})
+
+describe('buildWatchlistPayload', () => {
+  it('adds a whole movie by ids, with no watched_at', () => {
+    expect(buildWatchlistPayload(movie())).toEqual({ movies: [{ ids: { trakt: 1 } }] })
+  })
+
+  it('adds a whole show by ids, even an ongoing one (no season math)', () => {
+    expect(buildWatchlistPayload(show('returning series'))).toEqual({ shows: [{ ids: { trakt: 7 } }] })
   })
 })
 

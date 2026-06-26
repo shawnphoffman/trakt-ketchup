@@ -7,12 +7,16 @@ recommendations are actually accurate.
 
 ## How it works
 
-- **One card at a time**, big buttons, keyboard nav (`J`/`←` skip, `K`/`→`/`Space` watched).
-- **High-yield feed:** pulls Trakt's "most watched of all time" lists (movies +
-  shows), because those are the titles you're most likely to have already seen.
-- **Never repeats:** anything already in your Trakt history is hidden, and items
-  you skip are suppressed for ~180 days (the skip-memory) so you aren't asked
-  about them again.
+- **One card at a time**, big buttons, keyboard nav (`J`/`←` skip,
+  `W` watchlist, `K`/`→`/`Space` watched, `Backspace` undo).
+- **Watchlist too:** besides Watched/Skip you can add a title to your Trakt
+  watchlist, for stuff you haven't seen but want to.
+- **Variety in the feed:** pick a source (most-watched all-time, popular,
+  trending, this month) or the default "Surprise mix" that blends several wells
+  so you aren't shown the same all-time list every session.
+- **Never repeats:** anything already in your Trakt history or watchlist is
+  hidden, and items you skip are suppressed for ~180 days (the skip-memory) so
+  you aren't asked about them again.
 - **Batched writes:** marks are queued and flushed to `/sync/history` together,
   rather than one request per tap, to stay friendly with Trakt's rate limits.
 - **Prefetch-ahead:** the next cards are fetched in the background so the UI
@@ -64,6 +68,9 @@ code that writes to a user's permanent Trakt history.
 
 ## Settings
 
+- **Source:** which well the feed pulls from. "Surprise mix" (default) blends
+  most-watched all-time, popular, trending, and most-watched-this-month for
+  variety; or pin a single source. Changing it rebuilds the feed.
 - **Show:** movies / shows / both.
 - **Watched date** (we NEVER mark something watched as "now"):
   - **Unknown date** (default): sends the epoch sentinel
@@ -99,9 +106,8 @@ code that writes to a user's permanent Trakt history.
 
 ## Possible next steps
 
-- Genre / decade filters on the feed (the engine already paginates per source;
-  add `?genres=` / `?years=` to the calls in `src/lib/trakt.ts`).
+- Genre / decade filters on the feed (`getFeedPage` already builds the URL per
+  source; add `?genres=` / `?years=` there in `src/lib/trakt.ts`).
+- Deeper/randomized pagination within a source for even more variety.
 - Poster art (Trakt IDs include `tmdb`; fetch images from TMDB).
-- Blend more sources into the feed (trending, anticipated, box office).
 - Cross-device sync of the skip-memory (move it from IndexedDB to a backend store).
-- Undo for an accidental "Watched" before the batch flushes.
