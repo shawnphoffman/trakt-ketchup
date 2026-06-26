@@ -230,8 +230,25 @@ async function getAiredSeasons(showId: number): Promise<SeasonPayload[]> {
     .filter((s) => (s.episodes?.length ?? 0) > 0)
 }
 
-export async function addToHistory(payload: HistoryPayload): Promise<void> {
-  await api(`/sync/history`, { method: 'POST', body: JSON.stringify(payload) })
+/**
+ * Trakt's sync response. A 2xx does NOT mean the items were accepted: anything
+ * whose ids didn't resolve is returned (silently) under `not_found`, so callers
+ * must inspect this body rather than trust the HTTP status alone.
+ */
+export interface SyncResponse {
+  added?: Record<string, number>
+  updated?: Record<string, number>
+  existing?: Record<string, number>
+  not_found?: Record<string, unknown[]>
+}
+
+/** Total number of items Trakt reported under `not_found` across all buckets. */
+export function notFoundCount(res: SyncResponse): number {
+  return Object.values(res.not_found ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0)
+}
+
+export async function addToHistory(payload: HistoryPayload): Promise<SyncResponse> {
+  return api<SyncResponse>(`/sync/history`, { method: 'POST', body: JSON.stringify(payload) })
 }
 
 /**
@@ -252,8 +269,8 @@ export function buildWatchlistPayload(item: FeedItem): HistoryPayload {
   return item.type === 'movie' ? { movies: [{ ids: item.media.ids }] } : { shows: [{ ids: item.media.ids }] }
 }
 
-export async function addToWatchlist(payload: HistoryPayload): Promise<void> {
-  await api(`/sync/watchlist`, { method: 'POST', body: JSON.stringify(payload) })
+export async function addToWatchlist(payload: HistoryPayload): Promise<SyncResponse> {
+  return api<SyncResponse>(`/sync/watchlist`, { method: 'POST', body: JSON.stringify(payload) })
 }
 
 export async function removeFromWatchlist(item: FeedItem): Promise<void> {

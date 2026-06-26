@@ -9,8 +9,10 @@ import {
   addToWatchlist,
   buildHistoryPayload,
   buildWatchlistPayload,
+  notFoundCount,
   type FeedItem,
   type HistoryPayload,
+  type SyncResponse,
   type WatchedAt,
 } from './trakt'
 
@@ -112,13 +114,13 @@ export class WatchedQueue {
         items: history,
         run: async () => {
           const payloads = await Promise.all(history.map((b) => buildHistoryPayload(b.item, b.mode)))
-          await addToHistory(mergePayloads(payloads))
+          assertAccepted(await addToHistory(mergePayloads(payloads)), 'history')
         },
       },
       {
         items: watchlist,
         run: async () => {
-          await addToWatchlist(mergePayloads(watchlist.map((b) => buildWatchlistPayload(b.item))))
+          assertAccepted(await addToWatchlist(mergePayloads(watchlist.map((b) => buildWatchlistPayload(b.item)))), 'watchlist')
         },
       },
     ]
@@ -142,6 +144,18 @@ export class WatchedQueue {
       this.emit()
       throw firstError
     }
+  }
+}
+
+/**
+ * Trakt answers 2xx even when it accepted nothing, listing unresolved items
+ * under `not_found`. Treat any such item as a failure so the batch re-queues and
+ * the pending count stays visible, rather than silently dropping the mark.
+ */
+function assertAccepted(res: SyncResponse, label: string) {
+  const missing = notFoundCount(res)
+  if (missing > 0) {
+    throw new Error(`Trakt ${label}: ${missing} item(s) not found (rejected by Trakt)`)
   }
 }
 

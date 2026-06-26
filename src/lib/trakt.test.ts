@@ -7,7 +7,7 @@ vi.mock('./auth', () => ({
   getValidAccessToken: vi.fn(async () => 'test-token'),
 }))
 
-import { buildHistoryPayload, buildWatchlistPayload, type FeedItem } from './trakt'
+import { buildHistoryPayload, buildWatchlistPayload, notFoundCount, type FeedItem } from './trakt'
 
 // The unknown-date sentinel is a hard rule: marking must send epoch-0, never
 // "now". Pin the literal so a regression here fails loudly.
@@ -79,6 +79,21 @@ describe('buildHistoryPayload', () => {
         ],
       })
     })
+  })
+})
+
+describe('notFoundCount', () => {
+  it('is 0 when everything was accepted', () => {
+    expect(notFoundCount({ added: { movies: 1 }, not_found: { movies: [], shows: [] } })).toBe(0)
+  })
+
+  it('is 0 when not_found is absent', () => {
+    expect(notFoundCount({ added: { movies: 1 } })).toBe(0)
+  })
+
+  it('sums rejected items across every bucket', () => {
+    const res = { added: {}, not_found: { movies: [{ ids: {} }], shows: [], episodes: [{ ids: {} }, { ids: {} }] } }
+    expect(notFoundCount(res)).toBe(3)
   })
 })
 
