@@ -513,6 +513,7 @@ function SettingsPanel({
           <option value="popular">Popular</option>
           <option value="trending">Trending now</option>
           <option value="recent">Most watched this month</option>
+          <option value="classics">Classics (pre-2000)</option>
         </select>
       </div>
       <div className="setting">

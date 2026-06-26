@@ -90,20 +90,28 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 // Where feed cards come from. "Most watched, all time" is the highest-yield
 // source for backfilling, but always returns the same list, so we offer other
 // wells and a "mix" that blends them for variety.
-export type FeedSource = 'mix' | 'watched' | 'popular' | 'trending' | 'recent'
+export type FeedSource = 'mix' | 'watched' | 'popular' | 'trending' | 'recent' | 'classics'
 export type SingleSource = Exclude<FeedSource, 'mix'>
+
+// Upper bound (exclusive) for what counts as a "classic". Trakt's `years`
+// filter takes a range; we ask for the most-watched titles released before
+// this year so the classics well is high-yield old stuff, not obscure ones.
+const CLASSICS_YEARS = '1920-1999'
 
 // `wrapped` sources return rows like { movie } / { show }; `popular` returns
 // bare media objects. All support extended=full,images and ?page=&limit=.
-const SOURCE_ENDPOINT: Record<SingleSource, { path: string; wrapped: boolean }> = {
+// `query` adds extra filters (e.g. a `years` range) to the list request.
+const SOURCE_ENDPOINT: Record<SingleSource, { path: string; wrapped: boolean; query?: string }> = {
   watched: { path: 'watched/all', wrapped: true },
   popular: { path: 'popular', wrapped: false },
   trending: { path: 'trending', wrapped: true },
   recent: { path: 'watched/monthly', wrapped: true },
+  // Most-watched older titles: same high-yield well, scoped to pre-2000.
+  classics: { path: 'watched/all', wrapped: true, query: `years=${CLASSICS_YEARS}` },
 }
 
 /** Sources blended (round-robin) when the user picks "mix". */
-export const MIX_SOURCES: SingleSource[] = ['watched', 'popular', 'trending', 'recent']
+export const MIX_SOURCES: SingleSource[] = ['watched', 'popular', 'trending', 'recent', 'classics']
 
 export async function getFeedPage(
   source: SingleSource,
@@ -113,7 +121,8 @@ export async function getFeedPage(
 ): Promise<FeedItem[]> {
   const endpoint = SOURCE_ENDPOINT[source]
   const plural = type === 'movie' ? 'movies' : 'shows'
-  const rows = await api<unknown[]>(`/${plural}/${endpoint.path}?extended=full,images&page=${page}&limit=${limit}`)
+  const extra = endpoint.query ? `&${endpoint.query}` : ''
+  const rows = await api<unknown[]>(`/${plural}/${endpoint.path}?extended=full,images&page=${page}&limit=${limit}${extra}`)
   return rows.map((row) => {
     const media = (endpoint.wrapped ? (row as Record<MediaType, TraktMedia>)[type] : row) as TraktMedia
     return toFeedItem(type, media)
