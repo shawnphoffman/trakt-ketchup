@@ -472,6 +472,124 @@ kbd {
   font-family: ui-monospace, monospace;
 }
 
+/* ---- connect / landing --------------------------------------------------- */
+
+.connect {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(20px, 5vw, 48px);
+}
+
+.connect-card {
+  max-width: 600px;
+  width: 100%;
+  padding: clamp(26px, 4vw, 48px);
+  border-radius: 28px;
+  text-align: left;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 30px 90px rgba(0, 0, 0, 0.55),
+    0 2px 8px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  animation: card-in 0.4s ease both;
+}
+
+.connect-brand {
+  display: inline-block;
+  font-size: clamp(0.95rem, 1.3vw, 1.15rem);
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  margin-bottom: clamp(16px, 2.4vw, 26px);
+}
+
+.connect-brand .accent {
+  color: var(--accent);
+}
+
+.connect-title {
+  font-size: clamp(1.8rem, 4vw, 2.9rem);
+  line-height: 1.06;
+  letter-spacing: -0.02em;
+  margin: 0 0 clamp(12px, 1.6vw, 18px);
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5), 0 4px 30px rgba(0, 0, 0, 0.4);
+}
+
+.connect-lede {
+  color: #e3e6ec;
+  font-size: clamp(1rem, 1.4vw, 1.18rem);
+  line-height: 1.55;
+  margin: 0 0 clamp(20px, 2.4vw, 28px);
+}
+
+.connect-steps {
+  list-style: none;
+  margin: 0 0 clamp(24px, 3vw, 32px);
+  padding: 0;
+  counter-reset: step;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.connect-steps li {
+  position: relative;
+  padding-left: 40px;
+  color: var(--muted);
+  font-size: clamp(0.92rem, 1.2vw, 1.05rem);
+  line-height: 1.5;
+  counter-increment: step;
+}
+
+.connect-steps li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: -1px;
+  width: 27px;
+  height: 27px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.connect-steps strong {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.connect-btn {
+  width: 100%;
+  font-size: clamp(1.05rem, 1.6vw, 1.25rem);
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  padding: clamp(14px, 1.8vw, 18px);
+  border-radius: 16px;
+  box-shadow:
+    0 18px 50px rgba(237, 28, 36, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.connect-fine {
+  margin: clamp(14px, 1.8vw, 18px) 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
 /* ---- misc states --------------------------------------------------------- */
 
 .centered {

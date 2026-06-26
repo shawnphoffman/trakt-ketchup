@@ -182,14 +182,7 @@ export default function App() {
   if (phase === 'loading') return <Centered>Loading…</Centered>
   if (phase === 'need-config') return <NeedConfig />
   if (phase === 'error') return <Centered>Something broke: {error}</Centered>
-  if (phase === 'connect')
-    return (
-      <Centered>
-        <button className="btn btn-primary big" onClick={beginLogin}>
-          Connect Trakt
-        </button>
-      </Centered>
-    )
+  if (phase === 'connect') return <Connect />
 
   return (
     <div className="app">
@@ -287,6 +280,49 @@ function Footer() {
       </span>
       <span>Your Trakt login stays in your browser. Nothing is stored on our servers.</span>
     </footer>
+  )
+}
+
+/** Landing screen shown before the user has connected. States the purpose, how
+ *  it works, and the privacy posture, then hands off to the Trakt OAuth flow. */
+function Connect() {
+  return (
+    <>
+      <Backdrop item={null} />
+      <div className="connect">
+        <div className="connect-card">
+          <span className="connect-brand">
+            Trakt <span className="accent">Ketchup</span>
+          </span>
+          <h1 className="connect-title">Catch Trakt up on a lifetime of watching</h1>
+          <p className="connect-lede">
+            Trakt's recommendations are only as good as the history behind them. Ketchup walks you
+            through the most-watched movies and shows of all time, one at a time, so you can backfill
+            what you've already seen in a few minutes.
+          </p>
+          <ol className="connect-steps">
+            <li>
+              <strong>One title at a time.</strong> Tap Watched or Skip, or use your keyboard.
+            </li>
+            <li>
+              <strong>No repeats.</strong> Titles already in your history are hidden, and skips stay
+              gone for months.
+            </li>
+            <li>
+              <strong>Synced as you go.</strong> Marks batch up and post to your Trakt history in the
+              background.
+            </li>
+          </ol>
+          <button className="btn btn-primary connect-btn" onClick={beginLogin}>
+            Connect Trakt
+          </button>
+          <p className="connect-fine">
+            You'll sign in on Trakt. Your login stays in your browser, and nothing is stored on our
+            servers.
+          </p>
+        </div>
+      </div>
+    </>
   )
 }
 
