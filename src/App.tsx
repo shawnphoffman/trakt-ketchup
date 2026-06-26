@@ -263,7 +263,30 @@ export default function App() {
           <Centered>You're all caught up. Nothing left to ask about. 🎉</Centered>
         )}
       </main>
+
+      <Footer />
     </div>
+  )
+}
+
+/** Trakt API attribution (required by their terms) plus a one-line privacy
+ *  note. Tokens and skip-memory never leave the browser; the only server-side
+ *  piece is the stateless OAuth token proxy. */
+function Footer() {
+  return (
+    <footer className="app-footer">
+      <span>
+        This product uses the{' '}
+        <a href="https://trakt.tv" target="_blank" rel="noreferrer noopener">
+          Trakt
+        </a>{' '}
+        API but is not endorsed or certified by Trakt.
+      </span>
+      <span className="footer-sep" aria-hidden="true">
+        ·
+      </span>
+      <span>Your Trakt login stays in your browser. Nothing is stored on our servers.</span>
+    </footer>
   )
 }
 

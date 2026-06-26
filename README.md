@@ -55,6 +55,13 @@ State lives in the browser:
    (plain Vite) for the frontend and layers the `/api` functions on top. Plain
    `npm run dev` serves the SPA only, so the OAuth token exchange won't work.
 
+## Tests
+
+`npm test` runs the Vitest suite (`npm run test:watch` for watch mode). Coverage
+focuses on the write path — `buildHistoryPayload()` (movie / completed show /
+ongoing-show season filtering) and the batch `mergePayloads()` — since that's the
+code that writes to a user's permanent Trakt history.
+
 ## Settings
 
 - **Show:** movies / shows / both.
@@ -64,18 +71,31 @@ State lives in the browser:
     entry with no known date.
   - **Release date:** sends `watched_at: "released"` so Trakt backfills the title's release date.
 
-## Open / to verify
+## Security
 
-- **Unknown-date write format.** Trakt shipped "Mark Watched at Unknown Date"
-  in Oct 2025, initially web-only with API support "to follow". Unknown-date
-  entries surface in history with the year 1969/1970, i.e. the Unix epoch, so
-  we send `watched_at: 1970-01-01T00:00:00.000Z` as the sentinel. This is a
-  strong inference, not confirmed from the docs. **TODO:** make one
-  authenticated test call, then read back `/sync/history` and confirm the entry
-  shows as unknown-date (not a literal 1970 watch). If Trakt now exposes a
-  dedicated value (e.g. `watched_at: "unknown"` or `null`), switch the
-  `UNKNOWN_DATE` constant in `src/lib/trakt.ts` to it. Until confirmed, do NOT
-  fall back to "now" — surface an error instead.
+- **OAuth CSRF guard:** `beginLogin()` sends a random `state`, and
+  `completeLoginIfRedirected()` requires it back before spending the code, so a
+  forged `?code=` callback can't connect your session to another account.
+- **Proxy origin lock:** `/api/oauth/token` rejects any request whose `Origin`
+  isn't in the allowlist (the app's own redirect-URI origin, localhost, plus an
+  optional `ALLOWED_ORIGINS` comma-separated env var). Keeps third parties from
+  burning the Trakt app's rate limit through our credentials.
+- **Proxy rate limit:** the same endpoint caps requests per IP (best-effort,
+  per warm instance) and returns `429` past the limit, as a speed bump against
+  abuse beyond the origin lock.
+- **CSP + headers:** a strict Content-Security-Policy is injected into the built
+  HTML (`vite.config.ts`); `X-Frame-Options`, `X-Content-Type-Options`, and
+  `Referrer-Policy` come from `vercel.json`. Trakt tokens live in `localStorage`,
+  so the CSP's `script-src 'self'` is the main line of defense against token
+  theft via injected script.
+
+## Verified behavior
+
+- **Unknown-date write format (confirmed).** Sending
+  `watched_at: 1970-01-01T00:00:00.000Z` registers in Trakt history under the
+  "Unknown Date" section (not a literal 1970 watch) — verified by marking titles
+  and reading them back in the Trakt UI. The hard rule still holds: never fall
+  back to "now"; if the sentinel is ever rejected, surface an error.
 
 ## Possible next steps
 

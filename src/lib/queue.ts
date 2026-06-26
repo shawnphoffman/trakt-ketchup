@@ -100,7 +100,7 @@ export class WatchedQueue {
   }
 }
 
-function mergePayloads(payloads: HistoryPayload[]): HistoryPayload {
+export function mergePayloads(payloads: HistoryPayload[]): HistoryPayload {
   const merged: HistoryPayload = {}
   for (const p of payloads) {
     if (p.movies?.length) (merged.movies ??= []).push(...p.movies)

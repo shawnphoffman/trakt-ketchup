@@ -59,14 +59,24 @@ it. Note: `vercel.json`'s SPA rewrite excludes vite-internal prefixes
   token endpoint returns a Trakt-origin response, not a misconfig error).
 - **Full OAuth round-trip not yet confirmed end-to-end** (login → card feed).
 
-## Immediate next steps
+## Verified
 
-1. Click Connect Trakt, complete login, confirm a card loads.
-2. **F3 verification:** mark one title with `unknown` mode, then read back
-   `/sync/history` and confirm it shows as unknown-date — NOT a literal 1970
-   watch. The epoch-0 sentinel is a strong inference, not doc-confirmed. If
-   Trakt now exposes a dedicated value (`"unknown"` / `null`), update the
-   `UNKNOWN_DATE` constant in `src/lib/trakt.ts`.
+- **Unknown-date sentinel confirmed.** Marking with `unknown` mode registers in
+  Trakt history under the "Unknown Date" section (not a literal 1970 watch),
+  verified in the Trakt UI. The `UNKNOWN_DATE` epoch-0 sentinel in
+  `src/lib/trakt.ts` is correct; keep the hard rule (never fall back to "now").
+
+## Pre-launch hardening (done)
+
+- OAuth `state` CSRF guard in `src/lib/auth.ts`.
+- Origin allowlist + best-effort per-IP rate limit on `/api/oauth/token`
+  (optional `ALLOWED_ORIGINS` env var; returns 403/429).
+- Strict CSP injected at build time (`vite.config.ts`, build-only meta tag so it
+  doesn't break `vercel dev` HMR) + framing/sniffing headers in `vercel.json`.
+- Trakt API attribution + privacy line in the app footer (`<Footer>` in
+  `src/App.tsx`).
+- Vitest write-path tests (`npm test`): `buildHistoryPayload` + `mergePayloads`
+  in `src/lib/trakt.test.ts`.
 
 ## Possible later work (not committed)
 
