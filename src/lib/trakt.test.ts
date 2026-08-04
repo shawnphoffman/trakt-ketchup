@@ -7,7 +7,13 @@ vi.mock('./auth', () => ({
   getValidAccessToken: vi.fn(async () => 'test-token'),
 }))
 
-import { buildHistoryPayload, buildWatchlistPayload, notFoundCount, type FeedItem } from './trakt'
+import {
+  buildHistoryPayload,
+  buildWatchlistPayload,
+  exclusionFingerprint,
+  notFoundCount,
+  type FeedItem,
+} from './trakt'
 
 // The unknown-date sentinel is a hard rule: marking must send epoch-0, never
 // "now". Pin the literal so a regression here fails loudly.
@@ -125,5 +131,34 @@ describe('mergePayloads', () => {
 
   it('returns an empty payload for no input', () => {
     expect(mergePayloads([])).toEqual({})
+  })
+})
+
+describe('exclusionFingerprint', () => {
+  const base = {
+    movies: { watched_at: '2026-08-01T00:00:00.000Z', watchlisted_at: '2026-07-01T00:00:00.000Z' },
+    episodes: { watched_at: '2026-08-02T00:00:00.000Z', watchlisted_at: '2026-07-02T00:00:00.000Z' },
+    shows: { watchlisted_at: '2026-07-03T00:00:00.000Z' },
+    seasons: { watchlisted_at: '2026-07-04T00:00:00.000Z' },
+  }
+
+  it('is stable for unchanged activity', () => {
+    expect(exclusionFingerprint(base)).toBe(exclusionFingerprint({ ...base }))
+  })
+
+  it('changes when a watch or watchlist timestamp moves', () => {
+    const newer = { ...base, movies: { ...base.movies, watched_at: '2026-08-03T00:00:00.000Z' } }
+    expect(exclusionFingerprint(newer)).not.toBe(exclusionFingerprint(base))
+  })
+
+  // A rating or comment shouldn't cost the user a full history re-download.
+  it('ignores activity unrelated to the exclusion caches', () => {
+    const rated = { ...base, all: '2026-08-09T00:00:00.000Z', movies: { ...base.movies, rated_at: 'x' } }
+    expect(exclusionFingerprint(rated)).toBe(exclusionFingerprint(base))
+  })
+
+  it('tolerates missing groups', () => {
+    expect(() => exclusionFingerprint({})).not.toThrow()
+    expect(exclusionFingerprint({})).not.toBe(exclusionFingerprint(base))
   })
 })

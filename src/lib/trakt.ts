@@ -141,7 +141,9 @@ export async function getWatchedMovieIds(): Promise<number[]> {
 }
 
 export async function getWatchedShowIds(): Promise<number[]> {
-  const rows = await api<ShowRow[]>(`/sync/watched/shows`)
+  // `extended=noseasons` drops the per-season/per-episode breakdown, which is
+  // the bulk of this response and which we never read (we only want trakt ids).
+  const rows = await api<ShowRow[]>(`/sync/watched/shows?extended=noseasons`)
   return rows.map((r) => r.show.ids.trakt)
 }
 
@@ -153,6 +155,50 @@ export async function getWatchlistMovieIds(): Promise<number[]> {
 export async function getWatchlistShowIds(): Promise<number[]> {
   const rows = await api<ShowRow[]>(`/sync/watchlist/shows`)
   return rows.map((r) => r.show.ids.trakt)
+}
+
+// ---- change detection ------------------------------------------------------
+
+/**
+ * `/sync/last_activities` is a tiny document of "when did each kind of thing
+ * last change" timestamps. Polling it is far cheaper than re-downloading the
+ * whole watched history, so we use it to decide whether a resync is needed.
+ * Note Trakt tracks watches for movies and *episodes* (not shows), while
+ * watchlisting is tracked per movie/show/season/episode.
+ */
+interface ActivityGroup {
+  watched_at?: string
+  watchlisted_at?: string
+}
+
+export interface LastActivities {
+  all?: string
+  movies?: ActivityGroup
+  shows?: ActivityGroup
+  seasons?: ActivityGroup
+  episodes?: ActivityGroup
+}
+
+export async function getLastActivities(): Promise<LastActivities> {
+  return api<LastActivities>(`/sync/last_activities`)
+}
+
+/**
+ * Collapse the activity timestamps we actually care about into one comparable
+ * string. Deliberately ignores unrelated activity (ratings, comments, hides)
+ * so those don't trigger a pointless full resync.
+ */
+export function exclusionFingerprint(a: LastActivities): string {
+  return [
+    a.movies?.watched_at,
+    a.episodes?.watched_at,
+    a.movies?.watchlisted_at,
+    a.shows?.watchlisted_at,
+    a.seasons?.watchlisted_at,
+    a.episodes?.watchlisted_at,
+  ]
+    .map((t) => t ?? '')
+    .join('|')
 }
 
 // ---- marking watched -------------------------------------------------------
@@ -247,8 +293,22 @@ export function notFoundCount(res: SyncResponse): number {
   return Object.values(res.not_found ?? {}).reduce((n, arr) => n + (arr?.length ?? 0), 0)
 }
 
-export async function addToHistory(payload: HistoryPayload): Promise<SyncResponse> {
-  return api<SyncResponse>(`/sync/history`, { method: 'POST', body: JSON.stringify(payload) })
+/**
+ * `keepalive` lets a request outlive the page, which is what makes the
+ * flush-on-unload path actually reach Trakt instead of being cancelled. It caps
+ * the body at 64KB, so callers only set it on the unload path where losing the
+ * batch is the alternative.
+ */
+export interface WriteOpts {
+  keepalive?: boolean
+}
+
+export async function addToHistory(payload: HistoryPayload, opts: WriteOpts = {}): Promise<SyncResponse> {
+  return api<SyncResponse>(`/sync/history`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    keepalive: opts.keepalive,
+  })
 }
 
 /**
@@ -269,8 +329,12 @@ export function buildWatchlistPayload(item: FeedItem): HistoryPayload {
   return item.type === 'movie' ? { movies: [{ ids: item.media.ids }] } : { shows: [{ ids: item.media.ids }] }
 }
 
-export async function addToWatchlist(payload: HistoryPayload): Promise<SyncResponse> {
-  return api<SyncResponse>(`/sync/watchlist`, { method: 'POST', body: JSON.stringify(payload) })
+export async function addToWatchlist(payload: HistoryPayload, opts: WriteOpts = {}): Promise<SyncResponse> {
+  return api<SyncResponse>(`/sync/watchlist`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    keepalive: opts.keepalive,
+  })
 }
 
 export async function removeFromWatchlist(item: FeedItem): Promise<void> {

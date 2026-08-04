@@ -693,6 +693,13 @@ kbd {
   color: var(--muted);
 }
 
+/* Explanatory line under an action button, rather than a control's label. */
+.setting > .setting-hint {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  opacity: 0.8;
+}
+
 .select {
   appearance: none;
   -webkit-appearance: none;

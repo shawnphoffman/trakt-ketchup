@@ -18,6 +18,8 @@ import { Feed } from './lib/feed'
 import { WatchedQueue } from './lib/queue'
 import { loadSettings, saveSettings, type FeedSource, type Settings } from './lib/settings'
 import {
+  exclusionFingerprint,
+  getLastActivities,
   getWatchedMovieIds,
   getWatchedShowIds,
   getWatchlistMovieIds,
@@ -37,7 +39,10 @@ type PastAction =
   | { kind: 'watched'; item: FeedItem; mode: WatchedAt }
   | { kind: 'watchlist'; item: FeedItem }
 
-const WATCHED_SYNC_TTL = 1000 * 60 * 60 * 6 // re-sync the watched cache every 6h
+/** Fallback interval, used only when the cheap change-check is unavailable. */
+const WATCHED_SYNC_TTL = 1000 * 60 * 60 * 6
+
+type ResyncState = 'idle' | 'running' | 'done' | 'failed'
 
 export default function App() {
   const [phase, setPhase] = useState<Phase>('loading')
@@ -46,6 +51,7 @@ export default function App() {
   const [current, setCurrent] = useState<FeedItem | null>(null)
   const [pending, setPending] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
+  const [resyncState, setResyncState] = useState<ResyncState>('idle')
 
   const feedRef = useRef<Feed | null>(null)
   const queueRef = useRef<WatchedQueue | null>(null)
@@ -213,6 +219,25 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [phase, showSettings, onSkip, onWatched, onWatchlist, goBack])
 
+  /** Force a full re-download of the exclusion caches, then rebuild the feed so
+   *  anything newly known-watched drops out of the buffer immediately. */
+  const resync = useCallback(async () => {
+    setResyncState('running')
+    try {
+      await queueRef.current?.flush() // land pending marks first, or we'd pull stale state
+      await syncExclusionCaches({ force: true })
+      const feed = new Feed(settings.filter, settings.source)
+      await feed.init()
+      feedRef.current = feed
+      historyRef.current = []
+      setCanGoBack(false)
+      setCurrent(await feed.next())
+      setResyncState('done')
+    } catch {
+      setResyncState('failed')
+    }
+  }, [settings.filter, settings.source])
+
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch }
@@ -273,6 +298,8 @@ export default function App() {
         <SettingsPanel
           settings={settings}
           onChange={updateSettings}
+          resyncState={resyncState}
+          onResync={() => void resync()}
           onDisconnect={() => {
             clearTokens()
             location.reload()
@@ -376,11 +403,36 @@ function Connect() {
   )
 }
 
-/** Pull the user's watched history and watchlist into the IndexedDB exclusion
- *  caches so the feed never resurfaces a title they've seen or already saved. */
-async function syncExclusionCaches() {
-  const last = (await getMeta<number>('exclusionsSyncedAt')) ?? 0
-  if (Date.now() - last < WATCHED_SYNC_TTL) return
+/**
+ * Pull the user's watched history and watchlist into the IndexedDB exclusion
+ * caches so the feed never resurfaces a title they've seen or already saved.
+ *
+ * Gated on `/sync/last_activities` rather than a blind interval: that call is
+ * tiny, so we can check on every load and only pay for the full download when
+ * Trakt's own timestamps say something actually changed. Marks made on another
+ * device therefore show up on the next load instead of up to 6h later.
+ */
+async function syncExclusionCaches({ force = false } = {}) {
+  // Recorded only after a successful download, and deliberately sampled BEFORE
+  // it: anything that changes on Trakt mid-download is then still newer than
+  // what we stored, so the next load picks it up rather than skipping it.
+  let fingerprint: string | undefined
+  try {
+    fingerprint = exclusionFingerprint(await getLastActivities())
+  } catch {
+    fingerprint = undefined
+  }
+
+  if (!force) {
+    if (fingerprint !== undefined) {
+      if (fingerprint === (await getMeta<string>('exclusionsFingerprint'))) return
+    } else {
+      // If the check itself fails, fall back to the interval so a transient
+      // error can't strand the caches indefinitely.
+      const last = (await getMeta<number>('exclusionsSyncedAt')) ?? 0
+      if (Date.now() - last < WATCHED_SYNC_TTL) return
+    }
+  }
 
   const [movieIds, showIds, wlMovieIds, wlShowIds] = await Promise.all([
     getWatchedMovieIds(),
@@ -392,6 +444,7 @@ async function syncExclusionCaches() {
   await replaceWatchedCache([...entries(movieIds, 'movie'), ...entries(showIds, 'show')])
   await replaceWatchlistCache([...entries(wlMovieIds, 'movie'), ...entries(wlShowIds, 'show')])
   await setMeta('exclusionsSyncedAt', Date.now())
+  if (fingerprint !== undefined) await setMeta('exclusionsFingerprint', fingerprint)
 }
 
 /** Full-viewport ambient background: the current title's blurred backdrop over
@@ -497,10 +550,14 @@ function NeedConfig() {
 function SettingsPanel({
   settings,
   onChange,
+  resyncState,
+  onResync,
   onDisconnect,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
+  resyncState: ResyncState
+  onResync: () => void
   onDisconnect: () => void
 }) {
   return (
@@ -539,6 +596,18 @@ function SettingsPanel({
             </button>
           ))}
         </div>
+      </div>
+      <div className="setting">
+        <button className="btn btn-ghost" onClick={onResync} disabled={resyncState === 'running'}>
+          {resyncState === 'running' ? 'Re-syncing…' : 'Re-sync from Trakt'}
+        </button>
+        <span className="setting-hint">
+          {resyncState === 'done'
+            ? 'Up to date with Trakt.'
+            : resyncState === 'failed'
+              ? "Couldn't reach Trakt. Try again in a moment."
+              : 'Re-download your watched history and watchlist so already-seen titles stop appearing.'}
+        </span>
       </div>
       <button className="btn btn-ghost danger" onClick={onDisconnect}>
         Disconnect Trakt

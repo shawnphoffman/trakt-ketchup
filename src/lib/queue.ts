@@ -14,6 +14,7 @@ import {
   type HistoryPayload,
   type SyncResponse,
   type WatchedAt,
+  type WriteOpts,
 } from './trakt'
 
 const MAX_BATCH = 25
@@ -25,6 +26,14 @@ interface PendingItem {
   item: FeedItem
   action: QueueAction
   mode: WatchedAt
+  /**
+   * The exact body to send, resolved as soon as the item is enqueued rather
+   * than at flush time. Building it can require a network call (ongoing shows
+   * need their aired-episode list), and doing that during page unload meant the
+   * flush never got as far as issuing the write. By flush time this is almost
+   * always already settled.
+   */
+  payload: Promise<HistoryPayload>
 }
 
 export class WatchedQueue {
@@ -35,11 +44,15 @@ export class WatchedQueue {
   /** @param onChange notified with the pending count whenever it changes
    *  (enqueue, undo, flush, or a failed flush re-queue) so the UI can track it. */
   constructor(private onChange?: (pendingCount: number) => void) {
-    // Flush whatever is buffered before the tab goes away.
+    // Flush whatever is buffered before the tab goes away. These use keepalive
+    // so the request survives the page being torn down. `pagehide` is included
+    // because mobile browsers frequently skip `beforeunload` entirely.
+    const flushOnExit = () => void this.flush({ keepalive: true }).catch(() => {})
     window.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') void this.flush()
+      if (document.visibilityState === 'hidden') flushOnExit()
     })
-    window.addEventListener('beforeunload', () => void this.flush())
+    window.addEventListener('pagehide', flushOnExit)
+    window.addEventListener('beforeunload', flushOnExit)
   }
 
   private emit() {
@@ -54,7 +67,14 @@ export class WatchedQueue {
   async enqueue(item: FeedItem, action: QueueAction, mode: WatchedAt) {
     if (action === 'history') await markWatchedLocal(item.type, item.media.ids.trakt)
     else await markWatchlistLocal(item.type, item.media.ids.trakt)
-    this.pending.push({ item, action, mode })
+
+    // Start building the payload now, but don't await it: the tap should advance
+    // the card immediately, and the flush is at least a debounce away.
+    const payload =
+      action === 'history' ? buildHistoryPayload(item, mode) : Promise.resolve(buildWatchlistPayload(item))
+    payload.catch(() => {}) // settled again in send(); avoids an unhandled rejection
+
+    this.pending.push({ item, action, mode, payload })
     this.emit()
 
     if (this.pending.length >= MAX_BATCH) {
@@ -86,7 +106,7 @@ export class WatchedQueue {
     return false
   }
 
-  async flush(): Promise<void> {
+  async flush(opts: WriteOpts = {}): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
@@ -98,13 +118,13 @@ export class WatchedQueue {
     this.pending = []
     this.emit() // optimistically clear the count; restored below if the send fails
 
-    this.inFlight = this.send(batch).finally(() => {
+    this.inFlight = this.send(batch, opts).finally(() => {
       this.inFlight = null
     })
     return this.inFlight
   }
 
-  private async send(batch: PendingItem[]) {
+  private async send(batch: PendingItem[], opts: WriteOpts) {
     // Each action is its own Trakt request. Send them independently so a failure
     // in one doesn't re-queue (and thus duplicate) the items that already landed.
     const history = batch.filter((b) => b.action === 'history')
@@ -113,14 +133,15 @@ export class WatchedQueue {
       {
         items: history,
         run: async () => {
-          const payloads = await Promise.all(history.map((b) => buildHistoryPayload(b.item, b.mode)))
-          assertAccepted(await addToHistory(mergePayloads(payloads)), 'history')
+          const payloads = await Promise.all(history.map((b) => b.payload))
+          assertAccepted(await addToHistory(mergePayloads(payloads), opts), 'history')
         },
       },
       {
         items: watchlist,
         run: async () => {
-          assertAccepted(await addToWatchlist(mergePayloads(watchlist.map((b) => buildWatchlistPayload(b.item)))), 'watchlist')
+          const payloads = await Promise.all(watchlist.map((b) => b.payload))
+          assertAccepted(await addToWatchlist(mergePayloads(payloads), opts), 'watchlist')
         },
       },
     ]
