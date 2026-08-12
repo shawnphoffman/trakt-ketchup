@@ -117,9 +117,20 @@ export async function discoverServer(accountToken: string): Promise<PlexServer> 
  * Relay is last either way — it's the slow path through plex.tv.
  */
 function rankConnections(connections: ResourceConnection[]): ResourceConnection[] {
-  const https = connections.filter((c) => c.protocol === 'https')
+  // Custom Server Access URLs (a user's own domain) are dropped here rather
+  // than probed: the proxy only accepts *.plex.direct, so trying them would
+  // just burn a round trip on a guaranteed rejection.
+  const usable = connections.filter((c) => c.protocol === 'https' && isPlexDirect(c.uri))
   const score = (c: ResourceConnection) => (c.relay ? 2 : c.local ? 1 : 0)
-  return [...https].sort((a, b) => score(a) - score(b))
+  return [...usable].sort((a, b) => score(a) - score(b))
+}
+
+function isPlexDirect(uri: string): boolean {
+  try {
+    return new URL(uri).hostname.endsWith('.plex.direct')
+  } catch {
+    return false
+  }
 }
 
 async function firstReachable(connections: ResourceConnection[]): Promise<string | null> {

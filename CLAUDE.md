@@ -71,6 +71,17 @@ serverless function at `api/oauth/token.ts`. Local dev: run `vercel dev`
 directly (NOT `npm run dev` — that's plain Vite and won't serve `/api`). The
 `dev` npm script is intentionally just `vite` to avoid `vercel dev` recursion.
 
+**Serverless function gotchas (both cost a broken production deploy once):**
+
+- Each function must be **self-contained**. Vercel does not ship a shared module
+  under `api/` into the function bundle, so `import { x } from '../_shared'`
+  resolves fine under `vercel dev` (local filesystem) and then dies with
+  `ERR_MODULE_NOT_FOUND` in production. Duplicate the helper instead.
+- Every `.ts` under `api/` becomes a **public endpoint**, test files included.
+  `.vercelignore` keeps `api/**/*.test.ts` out of the upload.
+- `vercel dev` cannot catch either of these. Run `vercel build` and inspect
+  `.vercel/output/functions/` before trusting an `/api` change.
+
 Env vars live in a single gitignored `.env` (NOT `.env.local`): `vercel dev`'s
 function runtime reads `.env`, and Vite reads `.env` too, so one file serves
 both the browser build and the `/api` proxy. Restart `vercel dev` after editing

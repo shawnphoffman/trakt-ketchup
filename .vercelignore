@@ -1,0 +1,5 @@
+# Vercel turns every .ts file under api/ into a public serverless function, so
+# a test file there would be deployed as a live endpoint with the whole test
+# runner bundled into it. Keep tests out of the upload; they still run locally
+# and in CI via vitest.
+api/**/*.test.ts

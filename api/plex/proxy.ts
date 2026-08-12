@@ -1,6 +1,5 @@
 import { promises as dns } from 'node:dns'
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { clientIp, rateLimited } from '../_guard'
 
 // Read-only passthrough to the user's own Plex Media Server.
 //
@@ -16,7 +15,14 @@ import { clientIp, rateLimited } from '../_guard'
 // Nothing is stored, logged, or inspected: the body is streamed back to the
 // caller as-is and the token lives only for the duration of the request.
 
+// NOTE: everything this function needs is defined in this file, deliberately.
+// Vercel does not ship a shared module under api/ into the function bundle, so
+// an import of a sibling helper resolves fine under `vercel dev` (which reads
+// the local filesystem) and then dies with ERR_MODULE_NOT_FOUND in production.
+// The small duplication with api/oauth/token.ts is the price of that.
+
 const RATE_LIMIT = 240 // requests per minute, per IP
+const RATE_WINDOW_MS = 60_000
 
 /** A full library scan pages through in chunks, so allow a generous window. */
 const UPSTREAM_TIMEOUT_MS = 15_000
@@ -30,6 +36,33 @@ const FORWARDED_HEADERS = [
   'x-plex-version',
   'x-plex-platform',
 ]
+
+const hits = new Map<string, { count: number; resetAt: number }>()
+
+function clientIp(req: VercelRequest): string {
+  const fwd = req.headers['x-forwarded-for']
+  const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim()
+  return first || (req.headers['x-real-ip'] as string) || 'unknown'
+}
+
+/**
+ * Best-effort per-IP rate limit: an in-memory fixed window covering a single
+ * warm instance, so a speed bump against abuse rather than a guarantee. The cap
+ * is high because a full library scan legitimately pages through many requests.
+ */
+function rateLimited(ip: string): boolean {
+  const now = Date.now()
+  const entry = hits.get(ip)
+  if (!entry || now >= entry.resetAt) {
+    hits.set(ip, { count: 1, resetAt: now + RATE_WINDOW_MS })
+    if (hits.size > 5000) {
+      for (const [k, v] of hits) if (now >= v.resetAt) hits.delete(k)
+    }
+    return false
+  }
+  entry.count += 1
+  return entry.count > RATE_LIMIT
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
@@ -48,7 +81,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return
   }
 
-  if (rateLimited('plex', clientIp(req), RATE_LIMIT)) {
+  if (rateLimited(clientIp(req))) {
     res.status(429).json({ error: 'rate_limited' })
     return
   }
