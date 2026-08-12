@@ -1,15 +1,17 @@
-// Direct browser -> Plex client: server discovery, library sections, and the
-// unwatched item listing that feeds the /plex page.
+// Plex client: server discovery, library sections, and the unwatched item
+// listing that feeds the /plex page.
 //
-// Two hosts are involved. plex.tv is the account API (which servers do you
-// own?), and the Plex Media Server itself is reached over its own HTTPS
-// connection URI. Both send permissive CORS headers, which is what makes a
-// browser-only client possible.
+// Two hosts are involved, reached two different ways.
 //
-// Reaching the server MUST use the `uri` Plex hands back (a *.plex.direct
-// hostname), not the bare LAN address: plex.direct resolves to the same private
-// IP but carries a real certificate, so an HTTPS page can talk to it without
-// tripping mixed-content blocking.
+// plex.tv (the account API: which servers do you own?) allows cross-origin
+// reads, so the browser calls it directly.
+//
+// The Plex Media Server does NOT. It answers preflights with a hardcoded
+// `Access-Control-Allow-Origin: https://app.plex.tv`, so no third-party page
+// can read from it no matter what it sends. Those calls therefore go through
+// our own serverless passthrough (`api/plex/proxy.ts`), which has no such
+// restriction. The proxy only accepts *.plex.direct targets — the hostnames
+// Plex issues with real certificates for a user's own server.
 
 import type { MediaType } from './db'
 import { plexHeaders } from './plexAuth'
@@ -17,7 +19,12 @@ import { plexHeaders } from './plexAuth'
 const PLEX_TV = 'https://plex.tv/api/v2'
 
 /** How long to wait for a candidate connection to answer before moving on. */
-const PROBE_TIMEOUT_MS = 4000
+const PROBE_TIMEOUT_MS = 8000
+
+/** Wrap a Plex Media Server URL so it goes out through our passthrough. */
+function proxied(url: string): string {
+  return `/api/plex/proxy?url=${encodeURIComponent(url)}`
+}
 
 /** Items pulled per page from a library section. */
 const PAGE_SIZE = 200
@@ -96,14 +103,22 @@ export async function discoverServer(accountToken: string): Promise<PlexServer> 
   }
 
   throw new Error(
-    "Couldn't reach your Plex server from this browser. Check that it's online and that remote access or the local network is available.",
+    "Couldn't reach your Plex server. It needs to be online with Remote Access enabled, since the connection is made from our server rather than your browser — a server that only listens on your local network isn't reachable.",
   )
 }
 
-/** LAN first (fastest), then direct WAN, then relay (slow, last resort). */
+/**
+ * Direct WAN first, then LAN, then relay.
+ *
+ * Note this is ordered for the *proxy's* vantage point, not the browser's: a
+ * LAN address is unreachable from a deployed function (and rejected outright as
+ * a private address), so it can't lead. It stays ahead of relay because it does
+ * work under `vercel dev` on the user's own machine, and fails fast otherwise.
+ * Relay is last either way — it's the slow path through plex.tv.
+ */
 function rankConnections(connections: ResourceConnection[]): ResourceConnection[] {
   const https = connections.filter((c) => c.protocol === 'https')
-  const score = (c: ResourceConnection) => (c.relay ? 2 : c.local ? 0 : 1)
+  const score = (c: ResourceConnection) => (c.relay ? 2 : c.local ? 1 : 0)
   return [...https].sort((a, b) => score(a) - score(b))
 }
 
@@ -120,7 +135,10 @@ async function probe(uri: string): Promise<boolean> {
   const abort = new AbortController()
   const timer = setTimeout(() => abort.abort(), PROBE_TIMEOUT_MS)
   try {
-    const res = await fetch(`${uri}/identity`, { headers: { accept: 'application/json' }, signal: abort.signal })
+    const res = await fetch(proxied(`${uri}/identity`), {
+      headers: { accept: 'application/json' },
+      signal: abort.signal,
+    })
     return res.ok
   } catch {
     return false
@@ -138,7 +156,7 @@ interface SectionDirectory {
 }
 
 async function serverJson<T>(server: PlexServer, path: string): Promise<T> {
-  const res = await fetch(`${server.uri}${path}`, { headers: plexHeaders(server.token) })
+  const res = await fetch(proxied(`${server.uri}${path}`), { headers: plexHeaders(server.token) })
   if (!res.ok) throw new Error(`Plex ${path} -> ${res.status}`)
   return (await res.json()) as T
 }

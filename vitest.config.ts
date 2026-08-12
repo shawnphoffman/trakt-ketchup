@@ -5,6 +5,8 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    // `api/` is in here too: the serverless guards (SSRF address checks) are
+    // exactly the kind of logic that needs covering.
+    include: ['src/**/*.test.ts', 'api/**/*.test.ts'],
   },
 })

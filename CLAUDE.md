@@ -12,6 +12,11 @@ become accurate. See [README.md](README.md) for architecture and setup.
   is ever rejected by the API, surface an error — do NOT fall back to current time.
 - Direct browser→Trakt calls for everything except OAuth token exchange/refresh,
   which must stay server-side (client secret never reaches the browser).
+- **Plex Media Server calls must go through `api/plex/proxy.ts`.** PMS answers
+  preflights with a hardcoded `Access-Control-Allow-Origin: https://app.plex.tv`,
+  so browser-direct reads are impossible, not merely awkward. Verified against a
+  real server. The proxy only accepts `*.plex.direct` targets that resolve to
+  public IPs. plex.tv's account API *does* allow us and stays browser-direct.
 
 ## Locked design decisions
 
@@ -48,9 +53,11 @@ become accurate. See [README.md](README.md) for architecture and setup.
   (`lookupByExternalId`), so from `PlexFeed` onward everything is an ordinary
   `FeedItem` and the queue, exclusion caches, and go-back are untouched.
   Unresolvable items are skipped and counted, never guessed at. Plex auth is the
-  plex.tv PIN flow (no client secret, so no serverless proxy); server access
-  must use the `*.plex.direct` connection URI or HTTPS pages hit mixed content.
-  Trakt login is still required here - it's where every mark is written.
+  plex.tv PIN flow (no client secret needed); server reads go through the
+  passthrough above, which also means the user's server must be publicly
+  reachable (Remote Access on) - a LAN-only server can't be reached from a
+  deployed function. Trakt login is still required here: it's where every mark
+  is written.
 - **UX:** one big card, big Skip/Watchlist/Watched buttons, keyboard nav
   (`J`/`←` skip, `W` watchlist, `K`/`→`/`Space` watched, `Backspace` undo),
   prefetch-ahead feed so the UI never waits.

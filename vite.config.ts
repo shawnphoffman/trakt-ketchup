@@ -6,15 +6,15 @@ import react from '@vitejs/plugin-react'
 // Vite's HMR client and inline preamble under `vercel dev`. frame-ancestors is
 // not honored in meta CSP, so clickjacking is covered by X-Frame-Options in
 // vercel.json instead.
-//   connect-src: our /api proxy (self), direct Trakt API calls, the plex.tv
-//     account API, and the user's own server. Plex hands out *.plex.direct
-//     hostnames (real certs pointing at private IPs) on nonstandard ports, hence
-//     the port wildcard; without it the /plex page can't reach the server at all.
+//   connect-src: our /api proxies (self), direct Trakt API calls, and the
+//     plex.tv account API. The user's Plex server is deliberately NOT listed:
+//     it refuses cross-origin reads from anything but app.plex.tv, so that
+//     traffic goes through /api/plex/proxy (covered by 'self') instead.
 //   img-src https:: Trakt (and later TMDB) poster/backdrop hosts.
 //   style-src 'unsafe-inline': React inline style attributes (gradients, art).
 const CSP = [
   "default-src 'self'",
-  "connect-src 'self' https://api.trakt.tv https://plex.tv https://*.plex.tv https://*.plex.direct:*",
+  "connect-src 'self' https://api.trakt.tv https://plex.tv https://*.plex.tv",
   "img-src 'self' https: data:",
   "style-src 'self' 'unsafe-inline'",
   "script-src 'self'",

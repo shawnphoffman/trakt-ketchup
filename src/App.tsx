@@ -523,8 +523,9 @@ function ConnectPlex() {
             Connect Plex
           </button>
           <p className="connect-fine">
-            You'll sign in on plex.tv. Your browser talks to your Plex server directly; nothing
-            about your library reaches our servers.
+            You'll sign in on plex.tv. Plex servers refuse to talk to other websites directly, so
+            library reads are relayed through this app's server. Nothing is stored or logged there,
+            and your Plex server needs Remote Access turned on.
           </p>
         </div>
       </div>
