@@ -49,6 +49,8 @@ become accurate. See [README.md](README.md) for architecture and setup.
   own Plex libraries instead of Trakt's charts. Shows only titles Plex does NOT
   consider watched (movie `viewCount`, show `viewedLeafCount`/`leafCount`) - the
   premise is "you own it, never played it here, but did you see it elsewhere?".
+  A part-way show still counts as unwatched and IS shown (decided deliberately);
+  marking it then applies the usual whole-show/aired-seasons rule on Trakt.
   Each Plex item is resolved to a Trakt title via its IMDb/TMDB/TVDB GUIDs
   (`lookupByExternalId`), so from `PlexFeed` onward everything is an ordinary
   `FeedItem` and the queue, exclusion caches, and go-back are untouched.
