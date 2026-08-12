@@ -40,6 +40,17 @@ become accurate. See [README.md](README.md) for architecture and setup.
   `watchlist` → `/sync/watchlist`) and sends each group as its own request so one
   failing group doesn't re-queue (and duplicate) the other. Optimistic local
   update so the feed never resurfaces a just-marked item.
+- **Plex page (`/plex`):** same one-at-a-time deck, but the well is the user's
+  own Plex libraries instead of Trakt's charts. Shows only titles Plex does NOT
+  consider watched (movie `viewCount`, show `viewedLeafCount`/`leafCount`) - the
+  premise is "you own it, never played it here, but did you see it elsewhere?".
+  Each Plex item is resolved to a Trakt title via its IMDb/TMDB/TVDB GUIDs
+  (`lookupByExternalId`), so from `PlexFeed` onward everything is an ordinary
+  `FeedItem` and the queue, exclusion caches, and go-back are untouched.
+  Unresolvable items are skipped and counted, never guessed at. Plex auth is the
+  plex.tv PIN flow (no client secret, so no serverless proxy); server access
+  must use the `*.plex.direct` connection URI or HTTPS pages hit mixed content.
+  Trakt login is still required here - it's where every mark is written.
 - **UX:** one big card, big Skip/Watchlist/Watched buttons, keyboard nav
   (`J`/`←` skip, `W` watchlist, `K`/`→`/`Space` watched, `Backspace` undo),
   prefetch-ahead feed so the UI never waits.

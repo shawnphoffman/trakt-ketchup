@@ -129,6 +129,35 @@ export async function getFeedPage(
   })
 }
 
+// ---- external id lookup ----------------------------------------------------
+
+/** Id namespaces Trakt can resolve, in the order we trust them. */
+export type ExternalIdProvider = 'imdb' | 'tmdb' | 'tvdb'
+
+type SearchRow = { type: string } & Partial<Record<MediaType, TraktMedia>>
+
+/**
+ * Resolve an external id (as carried by a Plex item's GUIDs) to a Trakt title.
+ *
+ * Returns null both when Trakt has no match and when the id namespace isn't one
+ * it indexes for that type, so callers can just try the next provider. A 404 is
+ * a legitimate "no match" here rather than an error worth surfacing.
+ */
+export async function lookupByExternalId(
+  provider: ExternalIdProvider,
+  id: string,
+  type: MediaType,
+): Promise<FeedItem | null> {
+  const path = `/search/${provider}/${encodeURIComponent(id)}?type=${type}&extended=full,images`
+  const res = await fetch(`${API}${path}`, { headers: await authHeaders() })
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
+
+  const rows = (await res.json()) as SearchRow[]
+  const media = rows.find((row) => row.type === type)?.[type]
+  return media ? toFeedItem(type, media) : null
+}
+
 // ---- watched history + watchlist (for the exclusion cache) -----------------
 
 // Rows from /sync/{watched,watchlist}/{movies,shows} are wrapped per type.

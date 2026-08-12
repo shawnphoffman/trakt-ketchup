@@ -13,7 +13,21 @@ import type { MediaFilter } from './settings'
 const REFILL_THRESHOLD = 5 // refetch when fewer than this remain
 const PAGE_SIZE = 20
 
-export class Feed {
+/**
+ * What the card deck needs from whatever is supplying titles. The Trakt
+ * discovery feed and the Plex library feed are interchangeable behind this, so
+ * the UI, the write queue, and go-back work identically on both pages.
+ */
+export interface CardFeed {
+  init(): Promise<void>
+  next(): Promise<FeedItem | null>
+  peek(n: number): FeedItem[]
+  pushFront(item: FeedItem): void
+  exclude(type: MediaType, traktId: number): void
+  unexclude(type: MediaType, traktId: number): void
+}
+
+export class Feed implements CardFeed {
   private buffer: FeedItem[] = []
   private seen = new Set<string>() // dedupe across pages/sources within a session
   private excluded = new Set<string>() // watched + watchlisted + active skips
@@ -145,7 +159,7 @@ export class Feed {
 const preloaded = new Set<string>()
 
 /** Kick off background image loads (held in cache) for an upcoming card. */
-function preloadImages(item: FeedItem) {
+export function preloadImages(item: FeedItem) {
   for (const url of [item.backdrop, item.poster]) {
     if (!url || preloaded.has(url)) continue
     preloaded.add(url)
@@ -154,8 +168,8 @@ function preloadImages(item: FeedItem) {
   }
 }
 
-function interleave(lists: FeedItem[][]): FeedItem[] {
-  const out: FeedItem[] = []
+export function interleave<T>(lists: T[][]): T[] {
+  const out: T[] = []
   const max = Math.max(0, ...lists.map((l) => l.length))
   for (let i = 0; i < max; i++) {
     for (const list of lists) {

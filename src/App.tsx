@@ -14,9 +14,24 @@ import {
   setMeta,
   type MediaType,
 } from './lib/db'
-import { Feed } from './lib/feed'
+import { Feed, type CardFeed } from './lib/feed'
+import {
+  beginPlexLogin,
+  clearPlexToken,
+  completePlexLoginIfRedirected,
+  loadPlexToken,
+} from './lib/plexAuth'
+import { PlexFeed, type PlexFeedStatus } from './lib/plexFeed'
 import { WatchedQueue } from './lib/queue'
-import { loadSettings, saveSettings, type FeedSource, type Settings } from './lib/settings'
+import {
+  loadPlexSettings,
+  loadSettings,
+  savePlexSettings,
+  saveSettings,
+  type FeedSource,
+  type PlexSettings,
+  type Settings,
+} from './lib/settings'
 import {
   exclusionFingerprint,
   getLastActivities,
@@ -31,7 +46,19 @@ import {
 } from './lib/trakt'
 import { gradientFor } from './lib/visual'
 
-type Phase = 'loading' | 'need-config' | 'connect' | 'ready' | 'error'
+type Phase = 'loading' | 'need-config' | 'connect' | 'connect-plex' | 'ready' | 'error'
+
+/**
+ * Which deck this page is. `/plex` walks the user's own unwatched Plex library
+ * instead of Trakt's popularity charts; everything else about the page (the
+ * card, the buttons, the write queue, go-back) is identical, so the route is
+ * just a switch on where cards come from.
+ *
+ * Read once at module load: the two pages are separate document loads, so there
+ * is nothing to keep reactive.
+ */
+type Route = 'trakt' | 'plex'
+const ROUTE: Route = location.pathname.replace(/\/+$/, '') === '/plex' ? 'plex' : 'trakt'
 
 /** A reversible action, kept so go-back can restore the title and undo it. */
 type PastAction =
@@ -48,12 +75,14 @@ export default function App() {
   const [phase, setPhase] = useState<Phase>('loading')
   const [error, setError] = useState<string>('')
   const [settings, setSettings] = useState<Settings>(loadSettings)
+  const [plexSettings, setPlexSettings] = useState<PlexSettings>(loadPlexSettings)
+  const [plexStatus, setPlexStatus] = useState<PlexFeedStatus | null>(null)
   const [current, setCurrent] = useState<FeedItem | null>(null)
   const [pending, setPending] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [resyncState, setResyncState] = useState<ResyncState>('idle')
 
-  const feedRef = useRef<Feed | null>(null)
+  const feedRef = useRef<CardFeed | null>(null)
   const queueRef = useRef<WatchedQueue | null>(null)
   const historyRef = useRef<PastAction[]>([])
   const [canGoBack, setCanGoBack] = useState(false)
@@ -64,6 +93,21 @@ export default function App() {
     setCurrent(await feed.next())
   }, [])
 
+  /** Build and warm the deck's source for the current route. */
+  const buildFeed = useCallback(async (): Promise<CardFeed> => {
+    if (ROUTE === 'plex') {
+      const token = loadPlexToken()
+      if (!token) throw new Error('Not connected to Plex.')
+      const feed = new PlexFeed(settings.filter, plexSettings.sectionKeys, token)
+      await feed.init()
+      setPlexStatus(feed.status())
+      return feed
+    }
+    const feed = new Feed(settings.filter, settings.source)
+    await feed.init()
+    return feed
+  }, [settings.filter, settings.source, plexSettings.sectionKeys])
+
   // Bootstrap: complete OAuth redirect, then sync + build the feed.
   useEffect(() => {
     let cancelled = false
@@ -73,14 +117,21 @@ export default function App() {
         return
       }
       try {
+        // Trakt is required on both pages: it's where every mark is written.
         await completeLoginIfRedirected()
         if (!loadTokens()) {
           setPhase('connect')
           return
         }
+        if (ROUTE === 'plex') {
+          await completePlexLoginIfRedirected()
+          if (!loadPlexToken()) {
+            setPhase('connect-plex')
+            return
+          }
+        }
         await syncExclusionCaches()
-        const feed = new Feed(settings.filter, settings.source)
-        await feed.init()
+        const feed = await buildFeed()
         if (cancelled) return
         feedRef.current = feed
         queueRef.current = new WatchedQueue(setPending)
@@ -97,13 +148,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Rebuild the feed when the media filter or source changes.
+  // Rebuild the feed when the media filter, source, or Plex libraries change.
   useEffect(() => {
     if (phase !== 'ready') return
     let cancelled = false
     ;(async () => {
-      const feed = new Feed(settings.filter, settings.source)
-      await feed.init()
+      const feed = await buildFeed()
       if (cancelled) return
       feedRef.current = feed
       historyRef.current = [] // the old feed's items are gone; can't go back across a rebuild
@@ -114,7 +164,7 @@ export default function App() {
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings.filter, settings.source])
+  }, [settings.filter, settings.source, plexSettings.sectionKeys])
 
   const onWatched = useCallback(async () => {
     const item = current
@@ -226,8 +276,7 @@ export default function App() {
     try {
       await queueRef.current?.flush() // land pending marks first, or we'd pull stale state
       await syncExclusionCaches({ force: true })
-      const feed = new Feed(settings.filter, settings.source)
-      await feed.init()
+      const feed = await buildFeed()
       feedRef.current = feed
       historyRef.current = []
       setCanGoBack(false)
@@ -236,7 +285,7 @@ export default function App() {
     } catch {
       setResyncState('failed')
     }
-  }, [settings.filter, settings.source])
+  }, [buildFeed])
 
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((prev) => {
@@ -246,10 +295,21 @@ export default function App() {
     })
   }
 
-  if (phase === 'loading') return <Centered>Loading…</Centered>
+  const updatePlexSettings = (patch: Partial<PlexSettings>) => {
+    setPlexSettings((prev) => {
+      const next = { ...prev, ...patch }
+      savePlexSettings(next)
+      return next
+    })
+  }
+
+  if (phase === 'loading') {
+    return <Centered>{ROUTE === 'plex' ? 'Scanning your Plex libraries…' : 'Loading…'}</Centered>
+  }
   if (phase === 'need-config') return <NeedConfig />
   if (phase === 'error') return <Centered>Something broke: {error}</Centered>
   if (phase === 'connect') return <Connect />
+  if (phase === 'connect-plex') return <ConnectPlex />
 
   return (
     <div className="app">
@@ -258,8 +318,12 @@ export default function App() {
         <span className="brand-title">
           <Logo className="brand-logo" />
           Trakt <span className="accent">Ketchup</span>
+          {ROUTE === 'plex' && <span className="brand-sub">Plex library</span>}
         </span>
         <div className="brand-right">
+          <a className="brand-link" href={ROUTE === 'plex' ? '/' : '/plex'}>
+            {ROUTE === 'plex' ? 'Popular titles' : 'My Plex library'}
+          </a>
           {pending > 0 && (
             <span
               className="queue-chip"
@@ -298,10 +362,18 @@ export default function App() {
         <SettingsPanel
           settings={settings}
           onChange={updateSettings}
+          plexSettings={plexSettings}
+          onPlexChange={updatePlexSettings}
+          plexStatus={plexStatus}
           resyncState={resyncState}
           onResync={() => void resync()}
           onDisconnect={() => {
             clearTokens()
+            clearPlexToken()
+            location.reload()
+          }}
+          onDisconnectPlex={() => {
+            clearPlexToken()
             location.reload()
           }}
         />
@@ -328,6 +400,16 @@ export default function App() {
               </button>
             </div>
           </>
+        ) : ROUTE === 'plex' ? (
+          <Centered>
+            That's every unwatched title in your Plex libraries. 🎉
+            {plexStatus && plexStatus.unmatched > 0 && (
+              <p className="setting-hint">
+                {plexStatus.unmatched} Plex item{plexStatus.unmatched === 1 ? '' : 's'} couldn't be
+                matched to a Trakt title and {plexStatus.unmatched === 1 ? 'was' : 'were'} skipped.
+              </p>
+            )}
+          </Centered>
         ) : (
           <Centered>You're all caught up. Nothing left to ask about. 🎉</Centered>
         )}
@@ -396,6 +478,53 @@ function Connect() {
           <p className="connect-fine">
             You'll sign in on Trakt. Your login stays in your browser, and nothing is stored on our
             servers.
+          </p>
+        </div>
+      </div>
+    </>
+  )
+}
+
+/** Landing screen for /plex, shown once Trakt is connected but Plex isn't. */
+function ConnectPlex() {
+  return (
+    <>
+      <Backdrop item={null} />
+      <div className="connect">
+        <div className="connect-card">
+          <span className="connect-brand">
+            <Logo className="connect-logo" />
+            Trakt <span className="accent">Ketchup</span>
+          </span>
+          <h1 className="connect-title">Backfill from your own Plex library</h1>
+          <p className="connect-lede">
+            Ketchup walks the titles you own but that Plex has never seen you play. Plenty of them
+            you watched years ago somewhere else, so this is the highest-yield backfill there is:
+            you already cared enough to keep a copy.
+          </p>
+          <ol className="connect-steps">
+            <li>
+              <strong>Only the unplayed.</strong> Anything Plex already counts as watched is left
+              out entirely.
+            </li>
+            <li>
+              <strong>Matched to Trakt.</strong> Titles are resolved by their IMDb/TMDB/TVDB ids, so
+              marks land on the right entry.
+            </li>
+            <li>
+              <strong>No repeats.</strong> Whatever is already in your Trakt history or watchlist
+              never comes up.
+            </li>
+          </ol>
+          <button
+            className="btn btn-primary connect-btn"
+            onClick={() => void beginPlexLogin(`${location.origin}/plex`)}
+          >
+            Connect Plex
+          </button>
+          <p className="connect-fine">
+            You'll sign in on plex.tv. Your browser talks to your Plex server directly; nothing
+            about your library reaches our servers.
           </p>
         </div>
       </div>
@@ -550,33 +679,45 @@ function NeedConfig() {
 function SettingsPanel({
   settings,
   onChange,
+  plexSettings,
+  onPlexChange,
+  plexStatus,
   resyncState,
   onResync,
   onDisconnect,
+  onDisconnectPlex,
 }: {
   settings: Settings
   onChange: (patch: Partial<Settings>) => void
+  plexSettings: PlexSettings
+  onPlexChange: (patch: Partial<PlexSettings>) => void
+  plexStatus: PlexFeedStatus | null
   resyncState: ResyncState
   onResync: () => void
   onDisconnect: () => void
+  onDisconnectPlex: () => void
 }) {
   return (
     <div className="settings-panel">
-      <div className="setting">
-        <span>Source</span>
-        <select
-          className="select"
-          value={settings.source}
-          onChange={(e) => onChange({ source: e.target.value as FeedSource })}
-        >
-          <option value="mix">Surprise mix</option>
-          <option value="watched">Most watched (all time)</option>
-          <option value="popular">Popular</option>
-          <option value="trending">Trending now</option>
-          <option value="recent">Most watched this month</option>
-          <option value="classics">Classics (pre-2000)</option>
-        </select>
-      </div>
+      {ROUTE === 'plex' ? (
+        <PlexLibraryPicker settings={plexSettings} onChange={onPlexChange} status={plexStatus} />
+      ) : (
+        <div className="setting">
+          <span>Source</span>
+          <select
+            className="select"
+            value={settings.source}
+            onChange={(e) => onChange({ source: e.target.value as FeedSource })}
+          >
+            <option value="mix">Surprise mix</option>
+            <option value="watched">Most watched (all time)</option>
+            <option value="popular">Popular</option>
+            <option value="trending">Trending now</option>
+            <option value="recent">Most watched this month</option>
+            <option value="classics">Classics (pre-2000)</option>
+          </select>
+        </div>
+      )}
       <div className="setting">
         <span>Show</span>
         <div className="segmented">
@@ -609,9 +750,66 @@ function SettingsPanel({
               : 'Re-download your watched history and watchlist so already-seen titles stop appearing.'}
         </span>
       </div>
+      {ROUTE === 'plex' && (
+        <button className="btn btn-ghost danger" onClick={onDisconnectPlex}>
+          Disconnect Plex
+        </button>
+      )}
       <button className="btn btn-ghost danger" onClick={onDisconnect}>
         Disconnect Trakt
       </button>
+    </div>
+  )
+}
+
+/**
+ * Which Plex libraries the deck reads. An empty selection means every movie and
+ * show library, so a first-time user gets a working feed without touching this.
+ */
+function PlexLibraryPicker({
+  settings,
+  onChange,
+  status,
+}: {
+  settings: PlexSettings
+  onChange: (patch: Partial<PlexSettings>) => void
+  status: PlexFeedStatus | null
+}) {
+  const sections = status?.sections ?? []
+  const selected = (key: string) =>
+    settings.sectionKeys.length === 0 || settings.sectionKeys.includes(key)
+
+  const toggle = (key: string) => {
+    // Materialize "all" into an explicit list on first toggle, so unticking one
+    // library doesn't read as unticking every library.
+    const current = settings.sectionKeys.length === 0 ? sections.map((s) => s.key) : settings.sectionKeys
+    const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key]
+    onChange({ sectionKeys: next })
+  }
+
+  return (
+    <div className="setting">
+      <span>Libraries</span>
+      {sections.length === 0 ? (
+        <span className="setting-hint">No Plex libraries loaded yet.</span>
+      ) : (
+        <div className="checklist">
+          {sections.map((section) => (
+            <label key={section.key} className="checklist-item">
+              <input type="checkbox" checked={selected(section.key)} onChange={() => toggle(section.key)} />
+              <span>{section.title}</span>
+              <span className="checklist-type">{section.type === 'movie' ? 'Movies' : 'TV'}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      {status && (
+        <span className="setting-hint">
+          {status.server ? `${status.server} · ` : ''}
+          {status.candidates} unwatched title{status.candidates === 1 ? '' : 's'} left to review
+          {status.unmatched > 0 ? ` · ${status.unmatched} unmatched` : ''}
+        </span>
+      )}
     </div>
   )
 }

@@ -35,3 +35,23 @@ export function loadSettings(): Settings {
 export function saveSettings(s: Settings) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(s))
 }
+
+// ---- /plex page ------------------------------------------------------------
+
+export interface PlexSettings {
+  /** Library section keys to pull from. Empty means every movie/show library. */
+  sectionKeys: string[]
+}
+
+const PLEX_STORAGE_KEY = 'plex.settings'
+
+const PLEX_DEFAULTS: PlexSettings = { sectionKeys: [] }
+
+export function loadPlexSettings(): PlexSettings {
+  const raw = localStorage.getItem(PLEX_STORAGE_KEY)
+  return raw ? { ...PLEX_DEFAULTS, ...(JSON.parse(raw) as Partial<PlexSettings>) } : { ...PLEX_DEFAULTS }
+}
+
+export function savePlexSettings(s: PlexSettings) {
+  localStorage.setItem(PLEX_STORAGE_KEY, JSON.stringify(s))
+}
