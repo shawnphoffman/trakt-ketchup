@@ -135,10 +135,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       headers,
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
     })
-    const body = await upstream.text()
+    // Must stay binary-safe. Reading the upstream body as text decodes it as
+    // UTF-8, which silently replaces every invalid byte sequence with U+FFFD —
+    // harmless for the JSON this proxy originally carried, but it destroys
+    // artwork, and the corruption is unrecoverable rather than merely lossy.
+    const body = Buffer.from(await upstream.arrayBuffer())
     res.status(upstream.status)
     res.setHeader('Content-Type', upstream.headers.get('content-type') ?? 'application/json')
-    // The user's library listing is theirs alone; never let a cache hold it.
+    // The user's library is theirs alone; never let a shared cache hold it.
     res.setHeader('Cache-Control', 'no-store')
     res.send(body)
   } catch (e) {
