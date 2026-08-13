@@ -10,12 +10,16 @@ import react from '@vitejs/plugin-react'
 //     plex.tv account API. The user's Plex server is deliberately NOT listed:
 //     it refuses cross-origin reads from anything but app.plex.tv, so that
 //     traffic goes through /api/plex/proxy (covered by 'self') instead.
-//   img-src https:: Trakt (and later TMDB) poster/backdrop hosts.
+//   img-src https:: Trakt (and later TMDB) poster/backdrop hosts. `blob:` is
+//     required for Plex artwork: the server needs an X-Plex-Token header that
+//     an <img src> can't send, so those images are fetched through the proxy
+//     and handed to the DOM as blobs. Without it every Plex poster fails in
+//     production while looking fine under `vercel dev` (the CSP is build-only).
 //   style-src 'unsafe-inline': React inline style attributes (gradients, art).
 const CSP = [
   "default-src 'self'",
   "connect-src 'self' https://api.trakt.tv https://plex.tv https://*.plex.tv",
-  "img-src 'self' https: data:",
+  "img-src 'self' https: data: blob:",
   "style-src 'self' 'unsafe-inline'",
   "script-src 'self'",
   "font-src 'self'",

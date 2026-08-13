@@ -3,16 +3,24 @@
 // The only call that does NOT go through here is the token exchange (see auth.ts).
 
 import { getValidAccessToken } from './auth'
-import type { MediaType } from './db'
+import { identityKeys, type MediaType } from './db'
 
 const API = 'https://api.trakt.tv'
 const CLIENT_ID = import.meta.env.VITE_TRAKT_CLIENT_ID as string
 
+/**
+ * `trakt` is optional because Plex-sourced cards never carry one: resolving a
+ * Plex item to its Trakt entry costs an API call per title, which is what was
+ * rate-limiting us. Trakt accepts IMDb/TMDB/TVDB ids directly on both the sync
+ * endpoints and the `:id` path parameter, so a Trakt id is never required to
+ * act on a title — only to name it internally, which `identityKeys` handles.
+ */
 export interface TraktIds {
-  trakt: number
+  trakt?: number
   slug?: string
   tmdb?: number
   imdb?: string
+  tvdb?: number
 }
 
 /**
@@ -50,6 +58,21 @@ export interface FeedItem {
   poster?: string
   /** Landscape backdrop (fanart) for the ambient background. */
   backdrop?: string
+}
+
+/** Every cache/skip key this card is known by. One place, so the two decks
+ *  agree on identity even though they learn about titles differently. */
+export function keysFor(item: FeedItem): string[] {
+  return identityKeys(item.type, item.media.ids)
+}
+
+/** The id Trakt should be asked about in a `:id` path parameter. Trakt resolves
+ *  IMDb ids there as readily as its own, which is what lets a Plex card fetch
+ *  show details without ever having been looked up. */
+export function pathId(ids: TraktIds): string | null {
+  if (ids.trakt !== undefined) return String(ids.trakt)
+  if (ids.imdb) return ids.imdb
+  return null
 }
 
 /** Take the first usable URL from a Trakt image array and ensure it has a scheme. */
@@ -165,54 +188,13 @@ export async function getFeedPage(
   })
 }
 
-// ---- external id lookup ----------------------------------------------------
-
-/** Id namespaces Trakt can resolve, in the order we trust them. */
-export type ExternalIdProvider = 'imdb' | 'tmdb' | 'tvdb'
-
-type SearchRow = { type: string } & Partial<Record<MediaType, TraktMedia>>
-
-/**
- * Resolve an external id (as carried by a Plex item's GUIDs) to a Trakt title.
- *
- * Returns null both when Trakt has no match and when the id namespace isn't one
- * it indexes for that type, so callers can just try the next provider. A 404 is
- * a legitimate "no match" here rather than an error worth surfacing.
- */
-export async function lookupByExternalId(
-  provider: ExternalIdProvider,
-  id: string,
-  type: MediaType,
-): Promise<FeedItem | null> {
-  const path = `/search/${provider}/${encodeURIComponent(id)}?type=${type}&extended=full,images`
-
-  // A rejected fetch here is far more likely to be a rate-limited 429 stripped
-  // of its CORS headers than a genuine outage, and both want the same
-  // response: back off and try again rather than write the item off. Only a
-  // request that keeps failing is reported, so the caller can stop the scan.
-  let lastError: unknown
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await sleep(2000 * attempt)
-    await throttle()
-
-    try {
-      const res = await fetch(`${API}${path}`, { headers: await authHeaders() })
-      if (res.status === 429) continue // readable only when CORS headers survive
-      if (res.status === 404) return null
-      if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
-
-      const rows = (await res.json()) as SearchRow[]
-      const media = rows.find((row) => row.type === type)?.[type]
-      return media ? toFeedItem(type, media) : null
-    } catch (e) {
-      lastError = e
-    }
-  }
-
-  throw new Error(
-    `Trakt lookups are being rate limited or blocked (${lastError instanceof Error ? lastError.message : 'network error'}).`,
-  )
-}
+// NOTE: there was a per-title `/search/:provider/:id` lookup here, used to turn
+// a Plex item into a Trakt one before showing it. It was removed deliberately.
+// At one call per candidate it exhausted Trakt's rate limit on any real
+// library, and Trakt's 429 carries no CORS headers, so the failures surfaced as
+// opaque network errors that were impossible to handle precisely. Nothing needs
+// it: the sync endpoints accept external ids directly, and the caches match on
+// them via identityKeys. Please don't reintroduce it.
 
 // ---- watched history + watchlist (for the exclusion cache) -----------------
 
@@ -220,26 +202,30 @@ export async function lookupByExternalId(
 type MovieRow = { movie: TraktMedia }
 type ShowRow = { show: TraktMedia }
 
-export async function getWatchedMovieIds(): Promise<number[]> {
+// These deliberately keep every id Trakt returns, not just the Trakt one. The
+// external ids are what let a Plex card be recognised as already-watched
+// without a per-title lookup to translate it first.
+
+export async function getWatchedMovieIds(): Promise<TraktIds[]> {
   const rows = await api<MovieRow[]>(`/sync/watched/movies`)
-  return rows.map((r) => r.movie.ids.trakt)
+  return rows.map((r) => r.movie.ids)
 }
 
-export async function getWatchedShowIds(): Promise<number[]> {
+export async function getWatchedShowIds(): Promise<TraktIds[]> {
   // `extended=noseasons` drops the per-season/per-episode breakdown, which is
-  // the bulk of this response and which we never read (we only want trakt ids).
+  // the bulk of this response and which we never read (we only want ids).
   const rows = await api<ShowRow[]>(`/sync/watched/shows?extended=noseasons`)
-  return rows.map((r) => r.show.ids.trakt)
+  return rows.map((r) => r.show.ids)
 }
 
-export async function getWatchlistMovieIds(): Promise<number[]> {
+export async function getWatchlistMovieIds(): Promise<TraktIds[]> {
   const rows = await api<MovieRow[]>(`/sync/watchlist/movies`)
-  return rows.map((r) => r.movie.ids.trakt)
+  return rows.map((r) => r.movie.ids)
 }
 
-export async function getWatchlistShowIds(): Promise<number[]> {
+export async function getWatchlistShowIds(): Promise<TraktIds[]> {
   const rows = await api<ShowRow[]>(`/sync/watchlist/shows`)
-  return rows.map((r) => r.show.ids.trakt)
+  return rows.map((r) => r.show.ids)
 }
 
 // ---- change detection ------------------------------------------------------
@@ -331,16 +317,35 @@ const ENDED = new Set(['ended', 'canceled'])
  */
 export async function buildHistoryPayload(item: FeedItem, mode: WatchedAt): Promise<HistoryPayload> {
   if (item.type === 'movie') {
+    // Movies need no call at all: Trakt resolves the external ids on its side.
     return { movies: [{ ids: item.media.ids, ...stampFor(mode) }] }
   }
 
-  const ended = item.media.status ? ENDED.has(item.media.status) : false
+  const id = pathId(item.media.ids)
+
+  // Plex cards arrive without `status` because they were never looked up, so
+  // the whole-series-vs-aired-seasons decision needs one call here. Paying it
+  // per *mark* rather than per card shown is the whole point: you answer far
+  // fewer titles than you see, and a wrong guess would claim episodes the user
+  // never watched.
+  let status = item.media.status
+  if (status === undefined && id) {
+    try {
+      status = (await api<TraktMedia>(`/shows/${id}?extended=full`)).status
+    } catch (e) {
+      console.error('Could not read show status; marking aired seasons only', e)
+    }
+  }
+
+  const ended = status ? ENDED.has(status) : false
   if (ended) {
     return { shows: [{ ids: item.media.ids, ...stampFor(mode) }] }
   }
 
-  // Ongoing: send only aired episodes.
-  const seasons = await getAiredSeasons(item.media.ids.trakt)
+  // Ongoing (or unknown): send only aired episodes. Erring this way is
+  // deliberate — it under-claims rather than marking unaired/unseen episodes.
+  if (!id) return { shows: [{ ids: item.media.ids, ...stampFor(mode) }] }
+  const seasons = await getAiredSeasons(id)
   return { shows: [{ ids: item.media.ids, ...stampFor(mode), seasons }] }
 }
 
@@ -349,7 +354,8 @@ type SeasonSummary = {
   episodes: { number: number; first_aired: string | null }[]
 }
 
-async function getAiredSeasons(showId: number): Promise<SeasonPayload[]> {
+/** `showId` may be a Trakt id, slug, or IMDb id — Trakt accepts all three. */
+async function getAiredSeasons(showId: string): Promise<SeasonPayload[]> {
   const seasons = await api<SeasonSummary[]>(`/shows/${showId}/seasons?extended=episodes`)
   const nowIso = new Date().toISOString()
   return seasons

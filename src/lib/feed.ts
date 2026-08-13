@@ -6,8 +6,15 @@
 // round-robins across several wells (MIX_SOURCES) so the feed surfaces
 // different kinds of titles instead of the same all-time list every session.
 
-import { getActiveSkipKeys, getWatchedKeys, getWatchlistKeys, keyOf, type MediaType } from './db'
-import { getFeedPage, MIX_SOURCES, type FeedItem, type FeedSource, type SingleSource } from './trakt'
+import { getActiveSkipKeys, getWatchedKeys, getWatchlistKeys, type MediaType } from './db'
+import {
+  getFeedPage,
+  keysFor,
+  MIX_SOURCES,
+  type FeedItem,
+  type FeedSource,
+  type SingleSource,
+} from './trakt'
 import type { MediaFilter } from './settings'
 
 const REFILL_THRESHOLD = 5 // refetch when fewer than this remain
@@ -23,8 +30,10 @@ export interface CardFeed {
   next(): Promise<FeedItem | null>
   peek(n: number): FeedItem[]
   pushFront(item: FeedItem): void
-  exclude(type: MediaType, traktId: number): void
-  unexclude(type: MediaType, traktId: number): void
+  /** Keys come from `keysFor(item)`: a title has several identities, and the
+   *  two decks learn it under different ones. */
+  exclude(keys: string[]): void
+  unexclude(keys: string[]): void
 }
 
 export class Feed implements CardFeed {
@@ -52,9 +61,9 @@ export class Feed implements CardFeed {
     await this.ensureFilled()
   }
 
-  /** Optimistically suppress a key so it never reappears this session. */
-  exclude(type: MediaType, traktId: number) {
-    this.excluded.add(keyOf(type, traktId))
+  /** Optimistically suppress a title so it never reappears this session. */
+  exclude(keys: string[]) {
+    for (const key of keys) this.excluded.add(key)
   }
 
   /** Take the next card, kicking off a background refill when running low. */
@@ -77,8 +86,8 @@ export class Feed implements CardFeed {
   }
 
   /** Reverse an optimistic exclusion so an item can be acted on again. */
-  unexclude(type: MediaType, traktId: number) {
-    this.excluded.delete(keyOf(type, traktId))
+  unexclude(keys: string[]) {
+    for (const key of keys) this.excluded.delete(key)
   }
 
   private sources(): SingleSource[] {
@@ -146,9 +155,9 @@ export class Feed implements CardFeed {
 
     // Interleave movie/show results so the feed feels mixed, then filter.
     for (const item of interleave(lists)) {
-      const key = keyOf(item.type, item.media.ids.trakt)
-      if (this.seen.has(key) || this.excluded.has(key)) continue
-      this.seen.add(key)
+      const keys = keysFor(item)
+      if (keys.some((k) => this.seen.has(k) || this.excluded.has(k))) continue
+      for (const key of keys) this.seen.add(key)
       this.buffer.push(item)
       // Warm the browser cache for upcoming art so cards don't flash on advance.
       preloadImages(item)

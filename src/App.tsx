@@ -35,6 +35,7 @@ import {
 import {
   exclusionFingerprint,
   getLastActivities,
+  keysFor,
   getWatchedMovieIds,
   getWatchedShowIds,
   getWatchlistMovieIds,
@@ -42,6 +43,7 @@ import {
   removeFromHistory,
   removeFromWatchlist,
   type FeedItem,
+  type TraktIds,
   type WatchedAt,
 } from './lib/trakt'
 import { gradientFor } from './lib/visual'
@@ -176,8 +178,8 @@ export default function App() {
   const onWatched = useCallback(async () => {
     const item = current
     if (!item || !feedRef.current || !queueRef.current) return
-    feedRef.current.exclude(item.type, item.media.ids.trakt)
-    await markWatchedLocal(item.type, item.media.ids.trakt)
+    feedRef.current.exclude(keysFor(item))
+    await markWatchedLocal(item.type, keysFor(item))
     await queueRef.current.enqueue(item, 'history', settings.watchMode)
     historyRef.current.push({ kind: 'watched', item, mode: settings.watchMode })
     setCanGoBack(true)
@@ -187,8 +189,8 @@ export default function App() {
   const onWatchlist = useCallback(async () => {
     const item = current
     if (!item || !feedRef.current || !queueRef.current) return
-    feedRef.current.exclude(item.type, item.media.ids.trakt)
-    await markWatchlistLocal(item.type, item.media.ids.trakt)
+    feedRef.current.exclude(keysFor(item))
+    await markWatchlistLocal(item.type, keysFor(item))
     await queueRef.current.enqueue(item, 'watchlist', settings.watchMode)
     historyRef.current.push({ kind: 'watchlist', item })
     setCanGoBack(true)
@@ -198,8 +200,8 @@ export default function App() {
   const onSkip = useCallback(async () => {
     const item = current
     if (!item || !feedRef.current) return
-    feedRef.current.exclude(item.type, item.media.ids.trakt)
-    await recordSkip(item.type, item.media.ids.trakt, Date.now())
+    feedRef.current.exclude(keysFor(item))
+    await recordSkip(item.type, keysFor(item), Date.now())
     historyRef.current.push({ kind: 'skip', item })
     setCanGoBack(true)
     await advance()
@@ -216,11 +218,11 @@ export default function App() {
     // Put the title currently on screen back at the front so it isn't lost,
     // un-suppress the restored one, and show it immediately.
     if (current) feed.pushFront(current)
-    feed.unexclude(last.item.type, last.item.media.ids.trakt)
+    feed.unexclude(keysFor(last.item))
     setCurrent(last.item)
 
     if (last.kind === 'skip') {
-      await removeSkip(last.item.type, last.item.media.ids.trakt)
+      await removeSkip(keysFor(last.item))
       return
     }
 
@@ -229,7 +231,7 @@ export default function App() {
     const queue = queueRef.current
     const stillPending = queue?.unqueue(last.item) ?? false
     if (last.kind === 'watched') {
-      await markUnwatchedLocal(last.item.type, last.item.media.ids.trakt)
+      await markUnwatchedLocal(keysFor(last.item))
       if (!stillPending) {
         try {
           await removeFromHistory(last.item, last.mode)
@@ -238,7 +240,7 @@ export default function App() {
         }
       }
     } else {
-      await markUnwatchlistLocal(last.item.type, last.item.media.ids.trakt)
+      await markUnwatchlistLocal(keysFor(last.item))
       if (!stillPending) {
         try {
           await removeFromWatchlist(last.item)
@@ -511,18 +513,15 @@ function PlexEmptyState({
     )
   }
 
-  // Nothing resolved at all: not a "caught up" state, whatever the counts say.
-  if (status && status.missingIds + status.unmatched > 0 && status.candidates === 0) {
-    const total = status.missingIds + status.unmatched
+  // Every candidate lacked ids: not a "caught up" state, whatever the count says.
+  if (status && status.missingIds > 0 && status.candidates === 0) {
     return (
       <Centered>
-        <p>Nothing here could be matched to Trakt.</p>
+        <p>Nothing here carries an id Trakt can use.</p>
         <p className="setting-hint">
-          {total} item{total === 1 ? '' : 's'} skipped
-          {status.missingIds > 0 && ` · ${status.missingIds} carry no IMDb/TMDB/TVDB id in Plex`}
-          {status.unmatched > 0 && ` · ${status.unmatched} not found on Trakt`}
-          {status.missingIds > 0 &&
-            '. Libraries on a legacy Plex agent often lack these ids; refreshing the library metadata in Plex usually fixes it.'}
+          {status.missingIds} item{status.missingIds === 1 ? '' : 's'} skipped because Plex has no
+          IMDb, TMDB, or TVDB id for {status.missingIds === 1 ? 'it' : 'them'}. Libraries on a legacy
+          Plex agent often lack these; refreshing the library metadata in Plex usually fixes it.
         </p>
         <button className="btn btn-ghost" onClick={onRetry} disabled={retrying}>
           {retrying ? 'Retrying…' : 'Try again'}
@@ -534,11 +533,10 @@ function PlexEmptyState({
   return (
     <Centered>
       That's every unwatched title in your Plex libraries. 🎉
-      {status && status.missingIds + status.unmatched > 0 && (
+      {status && status.missingIds > 0 && (
         <p className="setting-hint">
-          {status.missingIds + status.unmatched} item
-          {status.missingIds + status.unmatched === 1 ? '' : 's'} couldn't be matched to a Trakt
-          title and were skipped.
+          {status.missingIds} item{status.missingIds === 1 ? '' : 's'} skipped: Plex has no IMDb,
+          TMDB, or TVDB id for {status.missingIds === 1 ? 'it' : 'them'}.
         </p>
       )}
     </Centered>
@@ -615,7 +613,7 @@ async function syncExclusionCaches({ force = false } = {}) {
 
   if (!force) {
     if (fingerprint !== undefined) {
-      if (fingerprint === (await getMeta<string>('exclusionsFingerprint'))) return
+      if (fingerprint === (await getMeta<string>('exclusionsFingerprintV2'))) return
     } else {
       // If the check itself fails, fall back to the interval so a transient
       // error can't strand the caches indefinitely.
@@ -630,11 +628,14 @@ async function syncExclusionCaches({ force = false } = {}) {
     getWatchlistMovieIds(),
     getWatchlistShowIds(),
   ])
-  const entries = (ids: number[], type: MediaType) => ids.map((id) => ({ type, traktId: id }))
+  const entries = (ids: TraktIds[], type: MediaType) => ids.map((id) => ({ type, ids: id }))
   await replaceWatchedCache([...entries(movieIds, 'movie'), ...entries(showIds, 'show')])
   await replaceWatchlistCache([...entries(wlMovieIds, 'movie'), ...entries(wlShowIds, 'show')])
   await setMeta('exclusionsSyncedAt', Date.now())
-  if (fingerprint !== undefined) await setMeta('exclusionsFingerprint', fingerprint)
+  // Key renamed when rows gained external ids: an unrecognised name forces one
+  // full re-download, without which existing caches would hold Trakt-id-only
+  // rows and never match a Plex card.
+  if (fingerprint !== undefined) await setMeta('exclusionsFingerprintV2', fingerprint)
 }
 
 /** Full-viewport ambient background: the current title's blurred backdrop over
@@ -868,9 +869,7 @@ function PlexLibraryPicker({
         <span className="setting-hint">
           {status.server ? `${status.server} · ` : ''}
           {status.candidates} unwatched title{status.candidates === 1 ? '' : 's'} left to review
-          {status.missingIds + status.unmatched > 0
-            ? ` · ${status.missingIds + status.unmatched} unmatched`
-            : ''}
+          {status.missingIds > 0 ? ` · ${status.missingIds} without usable ids` : ''}
         </span>
       )}
     </div>

@@ -57,6 +57,11 @@ export interface PlexCandidate {
   year: number | null
   type: MediaType
   guids: PlexGuids
+  /** Plex's own synopsis, shown on the card instead of Trakt's. */
+  summary?: string
+  /** Server-relative art paths; fetched through the proxy, never linked. */
+  thumb?: string
+  art?: string
 }
 
 // ---- server discovery ------------------------------------------------------
@@ -197,6 +202,9 @@ interface PlexMetadata {
   viewCount?: number
   leafCount?: number
   viewedLeafCount?: number
+  summary?: string
+  thumb?: string
+  art?: string
 }
 
 /**
@@ -234,6 +242,9 @@ export async function getUnwatchedItems(
         year: row.year ?? null,
         type: section.type,
         guids: parseGuids(row),
+        summary: row.summary,
+        thumb: row.thumb,
+        art: row.art,
       })
     }
     onProgress?.(out.length)
@@ -274,6 +285,45 @@ export async function getGuidsForItems(
 
 export function hasAnyGuid(guids: PlexGuids): boolean {
   return Boolean(guids.imdb || guids.tmdb || guids.tvdb)
+}
+
+// ---- artwork ---------------------------------------------------------------
+
+/**
+ * Plex art as a blob URL.
+ *
+ * An <img src> can't carry the X-Plex-Token header the server requires, and the
+ * alternative — putting the token in the query string — would leak it into
+ * history, referrers, and any log along the way. So the bytes are fetched
+ * through the proxy like any other read and handed to the DOM as a blob.
+ *
+ * Object URLs leak unless revoked, so the cache is bounded and evicts oldest
+ * first; a long session would otherwise pin every poster it ever showed.
+ */
+const MAX_CACHED_IMAGES = 60
+const imageCache = new Map<string, string>()
+
+export async function getImageUrl(server: PlexServer, path: string): Promise<string | undefined> {
+  const cached = imageCache.get(path)
+  if (cached) return cached
+
+  try {
+    const res = await fetch(proxied(`${server.uri}${path}`), { headers: plexHeaders(server.token) })
+    if (!res.ok) return undefined
+    const url = URL.createObjectURL(await res.blob())
+
+    if (imageCache.size >= MAX_CACHED_IMAGES) {
+      const oldest = imageCache.keys().next()
+      if (!oldest.done) {
+        URL.revokeObjectURL(imageCache.get(oldest.value)!)
+        imageCache.delete(oldest.value)
+      }
+    }
+    imageCache.set(path, url)
+    return url
+  } catch {
+    return undefined // art is decoration; a card without it is still usable
+  }
 }
 
 export function isWatched(row: {

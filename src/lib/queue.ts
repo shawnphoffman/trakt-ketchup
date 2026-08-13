@@ -9,6 +9,7 @@ import {
   addToWatchlist,
   buildHistoryPayload,
   buildWatchlistPayload,
+  keysFor,
   notFoundCount,
   type FeedItem,
   type HistoryPayload,
@@ -67,8 +68,9 @@ export class WatchedQueue {
    * used by the history action.
    */
   async enqueue(item: FeedItem, action: QueueAction, mode: WatchedAt) {
-    if (action === 'history') await markWatchedLocal(item.type, item.media.ids.trakt)
-    else await markWatchlistLocal(item.type, item.media.ids.trakt)
+    const keys = keysFor(item)
+    if (action === 'history') await markWatchedLocal(item.type, keys)
+    else await markWatchlistLocal(item.type, keys)
 
     // Start building the payload now, but don't await it: the tap should advance
     // the card immediately, and the flush is at least a debounce away.
@@ -100,9 +102,10 @@ export class WatchedQueue {
    * already been sent to Trakt and must be undone via the API instead.
    */
   unqueue(item: FeedItem): boolean {
+    const keys = new Set(keysFor(item))
     for (let i = this.pending.length - 1; i >= 0; i--) {
       const p = this.pending[i]
-      if (p.item.type === item.type && p.item.media.ids.trakt === item.media.ids.trakt) {
+      if (p.item.type === item.type && keysFor(p.item).some((k) => keys.has(k))) {
         this.pending.splice(i, 1)
         this.emit()
         return true

@@ -6,18 +6,29 @@
 //   1. discover the server and list the selected sections
 //   2. pull everything Plex does NOT consider watched (that whole set is the
 //      question: "you own it and never played it here, but did you see it?")
-//   3. resolve each item's GUIDs to a Trakt title, lazily, just ahead of the UI
-//   4. drop anything already in Trakt history/watchlist or under skip-memory
+//   3. drop anything already in Trakt history/watchlist or under skip-memory
+//   4. show it, using Plex's own title, synopsis, and artwork
 //
-// Step 3 is what lets everything downstream (the write queue, the exclusion
-// caches, go-back, the aired-seasons logic) stay exactly as it is: by the time
-// a card reaches the deck it is an ordinary Trakt-shaped FeedItem.
+// Note what is NOT here: any call to Trakt. An earlier version resolved every
+// candidate to its Trakt entry before showing it, which cost one API call per
+// title and rate-limited the app into uselessness on a library of any size.
+// Nothing needs it — Trakt accepts IMDb/TMDB/TVDB ids directly when marking,
+// and the caches match on those ids too (see identityKeys in db.ts). The only
+// Trakt calls the Plex deck makes now happen when the user actually marks a
+// show, which is a far smaller number than the titles they scroll past.
 
-import { getActiveSkipKeys, getWatchedKeys, getWatchlistKeys, keyOf, type MediaType } from './db'
-import { interleave, preloadImages, type CardFeed } from './feed'
+import {
+  getActiveSkipKeys,
+  getWatchedKeys,
+  getWatchlistKeys,
+  identityKeys,
+  type MediaType,
+} from './db'
+import { interleave, type CardFeed } from './feed'
 import {
   discoverServer,
   getGuidsForItems,
+  getImageUrl,
   getSections,
   getUnwatchedItems,
   hasAnyGuid,
@@ -26,28 +37,13 @@ import {
   type PlexServer,
 } from './plex'
 import type { MediaFilter } from './settings'
-import { lookupByExternalId, type ExternalIdProvider, type FeedItem } from './trakt'
+import type { FeedItem } from './trakt'
 
 const REFILL_THRESHOLD = 5
-/** Candidates resolved together. Trakt calls are throttled globally, so a
- *  bigger fan-out here would only queue up behind the same gate. */
-const RESOLVE_BATCH = 4
-/** Batches per fill() pass. Bounding this is what keeps a library that resolves
- *  nothing from being consumed in one uninterruptible run; next() will call
- *  again, but the UI gets to breathe in between. */
-const MAX_BATCHES_PER_FILL = 4
-/** Consecutive lookup *errors* before we stop and report rather than churn. */
-const FAILURE_LIMIT = 8
-
-type ResolveResult =
-  | { item: FeedItem; reason?: undefined }
-  | { item?: undefined; reason: 'no-ids' | 'not-found' | 'error' }
-
-/** Which id namespaces to try, best-supported first for each media type. */
-const PROVIDERS: Record<MediaType, ExternalIdProvider[]> = {
-  movie: ['imdb', 'tmdb'],
-  show: ['tvdb', 'imdb', 'tmdb'],
-}
+/** Candidates prepared per pass. Only Plex is contacted here (for artwork and
+ *  the occasional id backfill), so this is bounded by politeness to the user's
+ *  own server rather than by any third-party rate limit. */
+const PREPARE_BATCH = 6
 
 export interface PlexFeedStatus {
   server: string
@@ -55,13 +51,11 @@ export interface PlexFeedStatus {
   sections: PlexSection[]
   /** Sections actually being read this session. */
   activeSections: PlexSection[]
-  /** Unwatched Plex items queued up for review. */
+  /** Unwatched Plex items still queued up for review. */
   candidates: number
-  /** Items Trakt has no entry for. A real, permanent verdict about the item. */
-  unmatched: number
-  /** Items carrying no IMDb/TMDB/TVDB id at all, so nothing to look up. */
+  /** Items carrying no IMDb/TMDB/TVDB id, so Trakt could never identify them. */
   missingIds: number
-  /** Set when resolution was abandoned; the library was NOT fully reviewed. */
+  /** Set when the scan was abandoned; the library was NOT fully reviewed. */
   error: string | null
 }
 
@@ -71,18 +65,13 @@ export class PlexFeed implements CardFeed {
   private cursor = 0
   private seen = new Set<string>()
   private excluded = new Set<string>()
-  private resolving: Promise<void> | null = null
+  private filling: Promise<void> | null = null
 
   private server: PlexServer | null = null
   private sections: PlexSection[] = []
   private activeSections: PlexSection[] = []
-  private unmatched = 0
   private missingIds = 0
-  private failureStreak = 0
-  private lastError: string | null = null
   private error: string | null = null
-  /** Memoized Trakt lookups: box sets and duplicates resolve to the same ids. */
-  private lookups = new Map<string, FeedItem | null>()
 
   /** @param sectionKeys library sections to read; empty means "all of them". */
   constructor(
@@ -123,7 +112,6 @@ export class PlexFeed implements CardFeed {
       sections: this.sections,
       activeSections: this.activeSections,
       candidates: Math.max(0, this.candidates.length - this.cursor),
-      unmatched: this.unmatched,
       missingIds: this.missingIds,
       error: this.error,
     }
@@ -132,14 +120,13 @@ export class PlexFeed implements CardFeed {
   async next(): Promise<FeedItem | null> {
     if (this.buffer.length <= REFILL_THRESHOLD) void this.ensureFilled()
 
-    // `!this.error` and the progress check are both load-bearing. fill() returns
-    // immediately once it has given up, and it stops early to yield to the UI,
-    // so without them this becomes a tight loop that never awaits anything real
-    // and pins the tab at 100% CPU.
+    // The progress check is load-bearing: fill() returns early to yield to the
+    // UI, so without it this becomes a tight loop that never awaits anything
+    // real and pins the tab at 100% CPU.
     while (this.buffer.length === 0 && !this.exhausted() && !this.error) {
       const before = this.cursor
       await this.ensureFilled()
-      if (this.cursor === before) break // no progress: stop rather than spin
+      if (this.cursor === before) break
     }
     return this.buffer.shift() ?? null
   }
@@ -152,12 +139,12 @@ export class PlexFeed implements CardFeed {
     this.buffer.unshift(item)
   }
 
-  exclude(type: MediaType, traktId: number) {
-    this.excluded.add(keyOf(type, traktId))
+  exclude(keys: string[]) {
+    for (const key of keys) this.excluded.add(key)
   }
 
-  unexclude(type: MediaType, traktId: number) {
-    this.excluded.delete(keyOf(type, traktId))
+  unexclude(keys: string[]) {
+    for (const key of keys) this.excluded.delete(key)
   }
 
   private types(): MediaType[] {
@@ -172,70 +159,44 @@ export class PlexFeed implements CardFeed {
   }
 
   private ensureFilled(): Promise<void> {
-    if (this.resolving) return this.resolving
-    this.resolving = this.fill().finally(() => {
-      this.resolving = null
+    if (this.filling) return this.filling
+    this.filling = this.fill().finally(() => {
+      this.filling = null
     })
-    return this.resolving
+    return this.filling
   }
 
   /**
-   * Walk the candidate list resolving batches until the buffer is topped up.
-   * Loops rather than resolving once, because a batch can easily contribute
-   * nothing: unmatched items and already-excluded ones both fall out here.
-   *
-   * The failure guard matters more than it looks. Without it, one systematic
-   * problem (rate limiting, an expired token, a library whose items carry no
-   * external ids) makes every resolve return nothing, the loop drains the
-   * entire library in one pass, and the user is told they're all caught up
-   * while their whole library was silently discarded. Bailing out and
-   * surfacing the reason is always better than a cheerful empty deck.
+   * Take the next slice of candidates and turn the ones worth showing into
+   * cards. Filtering happens before any artwork is fetched, so an
+   * already-watched title costs nothing at all.
    */
   private async fill(): Promise<void> {
-    let passes = 0
-    while (this.buffer.length <= REFILL_THRESHOLD && !this.exhausted() && !this.error) {
-      if (passes++ >= MAX_BATCHES_PER_FILL) return
-      const batch = this.candidates.slice(this.cursor, this.cursor + RESOLVE_BATCH)
+    while (this.buffer.length <= REFILL_THRESHOLD && !this.exhausted()) {
+      const batch = this.candidates.slice(this.cursor, this.cursor + PREPARE_BATCH)
       this.cursor += batch.length
 
       await this.backfillGuids(batch)
-      const results = await Promise.all(batch.map((candidate) => this.resolve(candidate)))
 
-      let failures = 0
-      for (const result of results) {
-        if (result.item) {
-          this.failureStreak = 0
-          const key = keyOf(result.item.type, result.item.media.ids.trakt)
-          if (this.seen.has(key) || this.excluded.has(key)) continue
-          this.seen.add(key)
-          this.buffer.push(result.item)
-          preloadImages(result.item)
+      const showable: PlexCandidate[] = []
+      for (const candidate of batch) {
+        if (!hasAnyGuid(candidate.guids)) {
+          // Nothing Trakt could ever match, so marking it would be a no-op.
+          this.missingIds++
           continue
         }
-        if (result.reason === 'error') failures++
-        else if (result.reason === 'no-ids') this.missingIds++
-        else this.unmatched++
+        const keys = identityKeys(candidate.type, toTraktIds(candidate))
+        if (keys.some((k) => this.seen.has(k) || this.excluded.has(k))) continue
+        for (const key of keys) this.seen.add(key)
+        showable.push(candidate)
       }
 
-      // Only lookup *errors* count toward the streak. An item Trakt genuinely
-      // doesn't have is a normal outcome and must not trip the guard.
-      this.failureStreak = failures > 0 ? this.failureStreak + failures : 0
-      if (this.failureStreak >= FAILURE_LIMIT) {
-        this.error =
-          this.lastError ?? 'Trakt lookups keep failing, so the rest of the library was left alone.'
-        return
-      }
+      const items = await Promise.all(showable.map((c) => this.toFeedItem(c)))
+      this.buffer.push(...items)
+      return // one pass per call: lets the UI paint between batches
     }
   }
 
-  /**
-   * Resolve one Plex item to a Trakt title.
-   *
-   * `no-ids` and `not-found` are permanent verdicts about the item;
-   * `error` means the question couldn't be asked and says nothing about
-   * whether Trakt has it. Keeping them apart is what lets the caller tell a
-   * genuinely unmatchable library from a broken connection.
-   */
   /**
    * Fill in external ids for any candidate whose section listing arrived
    * without them, in one request for the whole batch. Plex accepts a
@@ -255,38 +216,42 @@ export class PlexFeed implements CardFeed {
         candidate.guids = found.get(candidate.ratingKey) ?? candidate.guids
       }
     } catch (e) {
-      // Leaves them without ids; they fall out as 'no-ids' below rather than
-      // being reported as a hard failure of the whole scan.
+      // They fall out as missing ids below rather than failing the whole scan.
       console.error('Plex metadata backfill failed', e)
     }
   }
 
-  private async resolve(candidate: PlexCandidate): Promise<ResolveResult> {
-    const guids = candidate.guids
-    if (!hasAnyGuid(guids)) return { reason: 'no-ids' }
+  /** A card built entirely from Plex's own metadata — no Trakt call. */
+  private async toFeedItem(candidate: PlexCandidate): Promise<FeedItem> {
+    const [poster, backdrop] = this.server
+      ? await Promise.all([
+          candidate.thumb ? getImageUrl(this.server, candidate.thumb) : undefined,
+          candidate.art ? getImageUrl(this.server, candidate.art) : undefined,
+        ])
+      : [undefined, undefined]
 
-    for (const provider of PROVIDERS[candidate.type]) {
-      const id = guids[provider]
-      if (!id) continue
-
-      const cacheKey = `${provider}:${id}:${candidate.type}`
-      const cached = this.lookups.get(cacheKey)
-      if (cached !== undefined) {
-        if (cached) return { item: cached }
-        continue
-      }
-
-      try {
-        const item = await lookupByExternalId(provider, id, candidate.type)
-        this.lookups.set(cacheKey, item)
-        if (item) return { item }
-      } catch (e) {
-        this.lastError = e instanceof Error ? e.message : String(e)
-        console.error('Trakt lookup failed for', candidate.title, e)
-        return { reason: 'error' }
-      }
+    return {
+      type: candidate.type,
+      media: {
+        title: candidate.title,
+        year: candidate.year,
+        ids: toTraktIds(candidate),
+        overview: candidate.summary,
+        // `status` is deliberately absent: it decides whole-series vs
+        // aired-seasons and is fetched at mark time, for marked shows only.
+      },
+      poster,
+      backdrop,
     }
+  }
+}
 
-    return { reason: 'not-found' }
+/** Plex GUIDs in the shape Trakt's sync endpoints accept verbatim. */
+function toTraktIds(candidate: PlexCandidate) {
+  const { imdb, tmdb, tvdb } = candidate.guids
+  return {
+    imdb,
+    tmdb: tmdb ? Number(tmdb) : undefined,
+    tvdb: tvdb ? Number(tvdb) : undefined,
   }
 }
