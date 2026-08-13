@@ -32,6 +32,15 @@ become accurate. See [README.md](README.md) for architecture and setup.
   from the feed like watched, undoable via go-back (`removeFromWatchlist`).
 - **Storage:** IndexedDB for the watched + watchlist exclusion caches and
   skip-memory (`src/lib/db.ts`, DB v2); localStorage for OAuth tokens + settings.
+  Cache rows are keyed by *identity*, one row per id a title is known by
+  (`identityKeys`), which is what lets a Plex card match Trakt history without
+  a lookup. The Trakt-id key format (`movie:123`) must stay as-is or every
+  existing cache and skip-memory entry is orphaned.
+- **Trakt rate limiting is the binding constraint.** All Trakt calls funnel
+  through one throttle in `src/lib/trakt.ts` (~2.8/s, under the 1000-per-5-min
+  limit). Staying under it is the strategy, because a 429 from Trakt has no
+  `Access-Control-Allow-Origin` header and so reaches the browser as an
+  unreadable network error - you cannot detect it after the fact.
 - **Watched-date setting:** `unknown` (default) vs `released`. `unknown` sends the
   Unix-epoch sentinel `1970-01-01T00:00:00.000Z` (Trakt renders epoch as "unknown
   date"); `released` sends `watched_at: "released"`. See `stampFor()` in
@@ -51,10 +60,16 @@ become accurate. See [README.md](README.md) for architecture and setup.
   premise is "you own it, never played it here, but did you see it elsewhere?".
   A part-way show still counts as unwatched and IS shown (decided deliberately);
   marking it then applies the usual whole-show/aired-seasons rule on Trakt.
-  Each Plex item is resolved to a Trakt title via its IMDb/TMDB/TVDB GUIDs
-  (`lookupByExternalId`), so from `PlexFeed` onward everything is an ordinary
-  `FeedItem` and the queue, exclusion caches, and go-back are untouched.
-  Unresolvable items are skipped and counted, never guessed at. Plex auth is the
+  Cards render from Plex's own metadata and artwork - the deck makes **zero
+  Trakt calls while browsing**. Do NOT reintroduce a per-title lookup to resolve
+  Plex items into Trakt ones: at one call per candidate it exhausts Trakt's rate
+  limit on any real library, and Trakt's 429 carries no CORS headers so the
+  failures arrive as opaque network errors. It isn't needed - the sync endpoints
+  take IMDb/TMDB/TVDB ids directly, and the caches match on them via
+  `identityKeys` (one row per id a title is known by). The only Trakt call the
+  deck makes is fetching a show's status when a show is actually *marked*, to
+  choose whole-series vs aired-seasons. Items with no external id are skipped
+  and counted, never guessed at. Plex auth is the
   plex.tv PIN flow (no client secret needed); server reads go through the
   passthrough above, which also means the user's server must be publicly
   reachable (Remote Access on) - a LAN-only server can't be reached from a
