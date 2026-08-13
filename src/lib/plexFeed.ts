@@ -17,8 +17,10 @@ import { getActiveSkipKeys, getWatchedKeys, getWatchlistKeys, keyOf, type MediaT
 import { interleave, preloadImages, type CardFeed } from './feed'
 import {
   discoverServer,
+  getItemGuids,
   getSections,
   getUnwatchedItems,
+  hasAnyGuid,
   type PlexCandidate,
   type PlexSection,
   type PlexServer,
@@ -29,6 +31,12 @@ import { lookupByExternalId, type ExternalIdProvider, type FeedItem } from './tr
 const REFILL_THRESHOLD = 5
 /** Trakt lookups issued at once while topping the buffer up. */
 const RESOLVE_BATCH = 8
+/** Consecutive lookup *errors* before we stop and report rather than churn. */
+const FAILURE_LIMIT = 12
+
+type ResolveResult =
+  | { item: FeedItem; reason?: undefined }
+  | { item?: undefined; reason: 'no-ids' | 'not-found' | 'error' }
 
 /** Which id namespaces to try, best-supported first for each media type. */
 const PROVIDERS: Record<MediaType, ExternalIdProvider[]> = {
@@ -44,8 +52,12 @@ export interface PlexFeedStatus {
   activeSections: PlexSection[]
   /** Unwatched Plex items queued up for review. */
   candidates: number
-  /** Items whose GUIDs Trakt couldn't resolve; skipped rather than shown. */
+  /** Items Trakt has no entry for. A real, permanent verdict about the item. */
   unmatched: number
+  /** Items carrying no IMDb/TMDB/TVDB id at all, so nothing to look up. */
+  missingIds: number
+  /** Set when resolution was abandoned; the library was NOT fully reviewed. */
+  error: string | null
 }
 
 export class PlexFeed implements CardFeed {
@@ -60,6 +72,12 @@ export class PlexFeed implements CardFeed {
   private sections: PlexSection[] = []
   private activeSections: PlexSection[] = []
   private unmatched = 0
+  private missingIds = 0
+  private failureStreak = 0
+  private lastError: string | null = null
+  private error: string | null = null
+  /** Memoized Trakt lookups: box sets and duplicates resolve to the same ids. */
+  private lookups = new Map<string, FeedItem | null>()
 
   /** @param sectionKeys library sections to read; empty means "all of them". */
   constructor(
@@ -101,6 +119,8 @@ export class PlexFeed implements CardFeed {
       activeSections: this.activeSections,
       candidates: Math.max(0, this.candidates.length - this.cursor),
       unmatched: this.unmatched,
+      missingIds: this.missingIds,
+      error: this.error,
     }
   }
 
@@ -151,39 +171,92 @@ export class PlexFeed implements CardFeed {
    * Walk the candidate list resolving batches until the buffer is topped up.
    * Loops rather than resolving once, because a batch can easily contribute
    * nothing: unmatched items and already-excluded ones both fall out here.
+   *
+   * The failure guard matters more than it looks. Without it, one systematic
+   * problem (rate limiting, an expired token, a library whose items carry no
+   * external ids) makes every resolve return nothing, the loop drains the
+   * entire library in one pass, and the user is told they're all caught up
+   * while their whole library was silently discarded. Bailing out and
+   * surfacing the reason is always better than a cheerful empty deck.
    */
   private async fill(): Promise<void> {
-    while (this.buffer.length <= REFILL_THRESHOLD && !this.exhausted()) {
+    while (this.buffer.length <= REFILL_THRESHOLD && !this.exhausted() && !this.error) {
       const batch = this.candidates.slice(this.cursor, this.cursor + RESOLVE_BATCH)
       this.cursor += batch.length
 
-      const resolved = await Promise.all(batch.map((candidate) => this.resolve(candidate)))
-      for (const item of resolved) {
-        if (!item) continue
-        const key = keyOf(item.type, item.media.ids.trakt)
-        if (this.seen.has(key) || this.excluded.has(key)) continue
-        this.seen.add(key)
-        this.buffer.push(item)
-        preloadImages(item)
+      const results = await Promise.all(batch.map((candidate) => this.resolve(candidate)))
+
+      let failures = 0
+      for (const result of results) {
+        if (result.item) {
+          this.failureStreak = 0
+          const key = keyOf(result.item.type, result.item.media.ids.trakt)
+          if (this.seen.has(key) || this.excluded.has(key)) continue
+          this.seen.add(key)
+          this.buffer.push(result.item)
+          preloadImages(result.item)
+          continue
+        }
+        if (result.reason === 'error') failures++
+        else if (result.reason === 'no-ids') this.missingIds++
+        else this.unmatched++
+      }
+
+      // Only lookup *errors* count toward the streak. An item Trakt genuinely
+      // doesn't have is a normal outcome and must not trip the guard.
+      this.failureStreak = failures > 0 ? this.failureStreak + failures : 0
+      if (this.failureStreak >= FAILURE_LIMIT) {
+        this.error =
+          this.lastError ?? 'Trakt lookups keep failing, so the rest of the library was left alone.'
+        return
       }
     }
   }
 
-  /** Try each id namespace the item carries until Trakt recognises one. */
-  private async resolve(candidate: PlexCandidate): Promise<FeedItem | null> {
-    for (const provider of PROVIDERS[candidate.type]) {
-      const id = candidate.guids[provider]
-      if (!id) continue
+  /**
+   * Resolve one Plex item to a Trakt title.
+   *
+   * `no-ids` and `not-found` are permanent verdicts about the item;
+   * `error` means the question couldn't be asked and says nothing about
+   * whether Trakt has it. Keeping them apart is what lets the caller tell a
+   * genuinely unmatchable library from a broken connection.
+   */
+  private async resolve(candidate: PlexCandidate): Promise<ResolveResult> {
+    let guids = candidate.guids
+
+    if (!hasAnyGuid(guids) && this.server) {
       try {
-        const item = await lookupByExternalId(provider, id, candidate.type)
-        if (item) return item
+        guids = await getItemGuids(this.server, candidate.ratingKey)
       } catch (e) {
-        // A transient lookup failure shouldn't sink the whole refill; the item
-        // is simply not offered this session.
-        console.error('Trakt lookup failed for', candidate.title, e)
+        this.lastError = `Couldn't read details for "${candidate.title}" from Plex.`
+        console.error('Plex metadata lookup failed for', candidate.title, e)
+        return { reason: 'error' }
       }
     }
-    this.unmatched++
-    return null
+    if (!hasAnyGuid(guids)) return { reason: 'no-ids' }
+
+    for (const provider of PROVIDERS[candidate.type]) {
+      const id = guids[provider]
+      if (!id) continue
+
+      const cacheKey = `${provider}:${id}:${candidate.type}`
+      const cached = this.lookups.get(cacheKey)
+      if (cached !== undefined) {
+        if (cached) return { item: cached }
+        continue
+      }
+
+      try {
+        const item = await lookupByExternalId(provider, id, candidate.type)
+        this.lookups.set(cacheKey, item)
+        if (item) return { item }
+      } catch (e) {
+        this.lastError = e instanceof Error ? e.message : String(e)
+        console.error('Trakt lookup failed for', candidate.title, e)
+        return { reason: 'error' }
+      }
+    }
+
+    return { reason: 'not-found' }
   }
 }

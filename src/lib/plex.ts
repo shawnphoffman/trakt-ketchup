@@ -243,6 +243,28 @@ export async function getUnwatchedItems(
   return out
 }
 
+/**
+ * External ids for a single item, fetched directly.
+ *
+ * Section listings only carry the `Guid` array when the server honours
+ * `includeGuids=1`, which not every agent/version combination does. The
+ * per-item metadata endpoint always includes it, so this is the fallback for
+ * candidates that arrived with nothing usable — one extra request, paid only
+ * for the items that need it.
+ */
+export async function getItemGuids(server: PlexServer, ratingKey: string): Promise<PlexGuids> {
+  const body = await serverJson<{ MediaContainer?: { Metadata?: PlexMetadata[] } }>(
+    server,
+    `/library/metadata/${encodeURIComponent(ratingKey)}`,
+  )
+  const row = body.MediaContainer?.Metadata?.[0]
+  return row ? parseGuids(row) : {}
+}
+
+export function hasAnyGuid(guids: PlexGuids): boolean {
+  return Boolean(guids.imdb || guids.tmdb || guids.tvdb)
+}
+
 export function isWatched(row: {
   type?: string
   viewCount?: number

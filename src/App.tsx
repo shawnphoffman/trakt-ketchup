@@ -83,6 +83,8 @@ export default function App() {
   const [resyncState, setResyncState] = useState<ResyncState>('idle')
 
   const feedRef = useRef<CardFeed | null>(null)
+  /** Same object as feedRef on /plex; kept typed so status() stays reachable. */
+  const plexFeedRef = useRef<PlexFeed | null>(null)
   const queueRef = useRef<WatchedQueue | null>(null)
   const historyRef = useRef<PastAction[]>([])
   const [canGoBack, setCanGoBack] = useState(false)
@@ -91,6 +93,9 @@ export default function App() {
     const feed = feedRef.current
     if (!feed) return
     setCurrent(await feed.next())
+    // Counts only move as the feed resolves more of the library, so re-read
+    // them here rather than leaving the init-time snapshot on screen.
+    if (plexFeedRef.current) setPlexStatus(plexFeedRef.current.status())
   }, [])
 
   /** Build and warm the deck's source for the current route. */
@@ -100,11 +105,13 @@ export default function App() {
       if (!token) throw new Error('Not connected to Plex.')
       const feed = new PlexFeed(settings.filter, plexSettings.sectionKeys, token)
       await feed.init()
+      plexFeedRef.current = feed
       setPlexStatus(feed.status())
       return feed
     }
     const feed = new Feed(settings.filter, settings.source)
     await feed.init()
+    plexFeedRef.current = null
     return feed
   }, [settings.filter, settings.source, plexSettings.sectionKeys])
 
@@ -401,15 +408,7 @@ export default function App() {
             </div>
           </>
         ) : ROUTE === 'plex' ? (
-          <Centered>
-            That's every unwatched title in your Plex libraries. 🎉
-            {plexStatus && plexStatus.unmatched > 0 && (
-              <p className="setting-hint">
-                {plexStatus.unmatched} Plex item{plexStatus.unmatched === 1 ? '' : 's'} couldn't be
-                matched to a Trakt title and {plexStatus.unmatched === 1 ? 'was' : 'were'} skipped.
-              </p>
-            )}
-          </Centered>
+          <PlexEmptyState status={plexStatus} onRetry={() => void resync()} retrying={resyncState === 'running'} />
         ) : (
           <Centered>You're all caught up. Nothing left to ask about. 🎉</Centered>
         )}
@@ -482,6 +481,67 @@ function Connect() {
         </div>
       </div>
     </>
+  )
+}
+
+/**
+ * What to say when the Plex deck runs dry. An empty deck means very different
+ * things depending on why, and a celebration is actively misleading when the
+ * library was skipped rather than reviewed — so the failure cases lead with the
+ * problem and offer a retry.
+ */
+function PlexEmptyState({
+  status,
+  onRetry,
+  retrying,
+}: {
+  status: PlexFeedStatus | null
+  onRetry: () => void
+  retrying: boolean
+}) {
+  if (status?.error) {
+    return (
+      <Centered>
+        <p>Stopped early — your library hasn't been fully reviewed.</p>
+        <p className="setting-hint">{status.error}</p>
+        <button className="btn btn-ghost" onClick={onRetry} disabled={retrying}>
+          {retrying ? 'Retrying…' : 'Try again'}
+        </button>
+      </Centered>
+    )
+  }
+
+  // Nothing resolved at all: not a "caught up" state, whatever the counts say.
+  if (status && status.missingIds + status.unmatched > 0 && status.candidates === 0) {
+    const total = status.missingIds + status.unmatched
+    return (
+      <Centered>
+        <p>Nothing here could be matched to Trakt.</p>
+        <p className="setting-hint">
+          {total} item{total === 1 ? '' : 's'} skipped
+          {status.missingIds > 0 && ` · ${status.missingIds} carry no IMDb/TMDB/TVDB id in Plex`}
+          {status.unmatched > 0 && ` · ${status.unmatched} not found on Trakt`}
+          {status.missingIds > 0 &&
+            '. Libraries on a legacy Plex agent often lack these ids; refreshing the library metadata in Plex usually fixes it.'}
+        </p>
+        <button className="btn btn-ghost" onClick={onRetry} disabled={retrying}>
+          {retrying ? 'Retrying…' : 'Try again'}
+        </button>
+      </Centered>
+    )
+  }
+
+  return (
+    <Centered>
+      That's every unwatched title in your Plex libraries. 🎉
+      {status && status.missingIds + status.unmatched > 0 && (
+        <p className="setting-hint">
+          {status.missingIds + status.unmatched} item
+          {status.missingIds + status.unmatched === 1 ? '' : 's'} couldn't be matched to a Trakt
+          title and were skipped.
+        </p>
+      )}
+    </Centered>
   )
 }
 
@@ -798,7 +858,7 @@ function PlexLibraryPicker({
           {sections.map((section) => (
             <label key={section.key} className="checklist-item">
               <input type="checkbox" checked={selected(section.key)} onChange={() => toggle(section.key)} />
-              <span>{section.title}</span>
+              <span className="checklist-name">{section.title}</span>
               <span className="checklist-type">{section.type === 'movie' ? 'Movies' : 'TV'}</span>
             </label>
           ))}
@@ -808,7 +868,9 @@ function PlexLibraryPicker({
         <span className="setting-hint">
           {status.server ? `${status.server} · ` : ''}
           {status.candidates} unwatched title{status.candidates === 1 ? '' : 's'} left to review
-          {status.unmatched > 0 ? ` · ${status.unmatched} unmatched` : ''}
+          {status.missingIds + status.unmatched > 0
+            ? ` · ${status.missingIds + status.unmatched} unmatched`
+            : ''}
         </span>
       )}
     </div>

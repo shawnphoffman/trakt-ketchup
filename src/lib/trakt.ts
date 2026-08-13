@@ -149,13 +149,28 @@ export async function lookupByExternalId(
   type: MediaType,
 ): Promise<FeedItem | null> {
   const path = `/search/${provider}/${encodeURIComponent(id)}?type=${type}&extended=full,images`
-  const res = await fetch(`${API}${path}`, { headers: await authHeaders() })
-  if (res.status === 404) return null
-  if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
 
-  const rows = (await res.json()) as SearchRow[]
-  const media = rows.find((row) => row.type === type)?.[type]
-  return media ? toFeedItem(type, media) : null
+  // Resolving a whole library is thousands of lookups, which will meet Trakt's
+  // rate limit sooner or later. A 429 is expected traffic shaping, not an
+  // error, so wait it out once before giving up on the item.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch(`${API}${path}`, { headers: await authHeaders() })
+
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('retry-after') ?? '2')
+      const waitMs = Math.min(Number.isFinite(retryAfter) ? retryAfter : 2, 10) * 1000
+      await new Promise((r) => setTimeout(r, waitMs))
+      continue
+    }
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
+
+    const rows = (await res.json()) as SearchRow[]
+    const media = rows.find((row) => row.type === type)?.[type]
+    return media ? toFeedItem(type, media) : null
+  }
+
+  throw new Error('Trakt rate limit: too many lookups, try again in a minute')
 }
 
 // ---- watched history + watchlist (for the exclusion cache) -----------------

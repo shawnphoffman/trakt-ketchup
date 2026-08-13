@@ -149,40 +149,96 @@ body {
   background: rgba(255, 255, 255, 0.12);
 }
 
-/* Plex library picker: one row per library section. */
+/* Plex library picker: one row per library section, styled as a single inset
+   panel so it reads as one control alongside .select and .segmented. */
 .checklist {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  background: var(--surface-2);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 4px;
 }
 
 .checklist-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 9px;
-  border-radius: 10px;
+  gap: 11px;
+  min-width: 0;
+  padding: 9px 11px;
+  border-radius: 8px;
   cursor: pointer;
   font-size: 0.92rem;
+  color: var(--muted);
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .checklist-item:hover {
   background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
 }
 
+/* Selected rows carry full-strength text so the active set is scannable
+   without reading every checkbox. */
+.checklist-item:has(input:checked) {
+  color: var(--text);
+}
+
+.checklist-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Native checkbox restyled in place: no wrapper element needed, and the input
+   stays the real focus target for keyboard and screen readers. */
 .checklist-item input {
-  accent-color: var(--accent);
-  width: 16px;
-  height: 16px;
+  appearance: none;
+  -webkit-appearance: none;
   flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  border: 1.5px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.checklist-item:hover input {
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.checklist-item input:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 12px;
+}
+
+.checklist-item input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .checklist-type {
   margin-left: auto;
-  font-size: 0.74rem;
+  flex: none;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
   color: var(--muted);
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 3px 7px;
+  text-shadow: none;
 }
 
 .queue-chip {
@@ -287,6 +343,7 @@ body {
 }
 
 .drawer-head {
+  flex: none; /* stays pinned while .settings-panel scrolls under it */
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -714,6 +771,7 @@ kbd {
 
 /* ---- misc states --------------------------------------------------------- */
 
+/* Standalone use (loading, error, connect) fills the viewport itself. */
 .centered {
   position: relative;
   z-index: 1;
@@ -729,6 +787,20 @@ kbd {
   font-size: clamp(1rem, 1.6vw, 1.4rem);
 }
 
+/* Nested as the deck's empty state, it must fill the stage instead — the
+   standalone 100vh above would otherwise stack on top of the brand bar and
+   footer and push the page past the viewport. */
+.stage > .centered {
+  min-height: 0;
+  flex: 1;
+  align-self: stretch;
+}
+
+.stage > .centered p {
+  margin: 0;
+  max-width: 46ch;
+}
+
 .config {
   max-width: 560px;
   margin: 0 auto;
@@ -742,11 +814,40 @@ kbd {
   color: var(--text);
 }
 
+/* The drawer is a fixed-height flex column, so the panel scrolls rather than
+   the page. `min-height: 0` is what actually lets it shrink below its content
+   height; without it a flex child refuses to overflow and the tail of a long
+   library list becomes unreachable. `overscroll-behavior` stops a scroll that
+   hits the end from chaining through to the deck behind the drawer. */
 .settings-panel {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 22px;
+  /* Room for the scrollbar so it doesn't sit on top of the controls. */
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.settings-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.settings-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .setting {
