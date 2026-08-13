@@ -17,7 +17,7 @@ import { getActiveSkipKeys, getWatchedKeys, getWatchlistKeys, keyOf, type MediaT
 import { interleave, preloadImages, type CardFeed } from './feed'
 import {
   discoverServer,
-  getItemGuids,
+  getGuidsForItems,
   getSections,
   getUnwatchedItems,
   hasAnyGuid,
@@ -29,10 +29,15 @@ import type { MediaFilter } from './settings'
 import { lookupByExternalId, type ExternalIdProvider, type FeedItem } from './trakt'
 
 const REFILL_THRESHOLD = 5
-/** Trakt lookups issued at once while topping the buffer up. */
-const RESOLVE_BATCH = 8
+/** Candidates resolved together. Trakt calls are throttled globally, so a
+ *  bigger fan-out here would only queue up behind the same gate. */
+const RESOLVE_BATCH = 4
+/** Batches per fill() pass. Bounding this is what keeps a library that resolves
+ *  nothing from being consumed in one uninterruptible run; next() will call
+ *  again, but the UI gets to breathe in between. */
+const MAX_BATCHES_PER_FILL = 4
 /** Consecutive lookup *errors* before we stop and report rather than churn. */
-const FAILURE_LIMIT = 12
+const FAILURE_LIMIT = 8
 
 type ResolveResult =
   | { item: FeedItem; reason?: undefined }
@@ -126,8 +131,15 @@ export class PlexFeed implements CardFeed {
 
   async next(): Promise<FeedItem | null> {
     if (this.buffer.length <= REFILL_THRESHOLD) void this.ensureFilled()
-    while (this.buffer.length === 0 && !this.exhausted()) {
+
+    // `!this.error` and the progress check are both load-bearing. fill() returns
+    // immediately once it has given up, and it stops early to yield to the UI,
+    // so without them this becomes a tight loop that never awaits anything real
+    // and pins the tab at 100% CPU.
+    while (this.buffer.length === 0 && !this.exhausted() && !this.error) {
+      const before = this.cursor
       await this.ensureFilled()
+      if (this.cursor === before) break // no progress: stop rather than spin
     }
     return this.buffer.shift() ?? null
   }
@@ -180,10 +192,13 @@ export class PlexFeed implements CardFeed {
    * surfacing the reason is always better than a cheerful empty deck.
    */
   private async fill(): Promise<void> {
+    let passes = 0
     while (this.buffer.length <= REFILL_THRESHOLD && !this.exhausted() && !this.error) {
+      if (passes++ >= MAX_BATCHES_PER_FILL) return
       const batch = this.candidates.slice(this.cursor, this.cursor + RESOLVE_BATCH)
       this.cursor += batch.length
 
+      await this.backfillGuids(batch)
       const results = await Promise.all(batch.map((candidate) => this.resolve(candidate)))
 
       let failures = 0
@@ -221,18 +236,33 @@ export class PlexFeed implements CardFeed {
    * whether Trakt has it. Keeping them apart is what lets the caller tell a
    * genuinely unmatchable library from a broken connection.
    */
-  private async resolve(candidate: PlexCandidate): Promise<ResolveResult> {
-    let guids = candidate.guids
+  /**
+   * Fill in external ids for any candidate whose section listing arrived
+   * without them, in one request for the whole batch. Plex accepts a
+   * comma-separated set of rating keys, so this costs one round trip per batch
+   * rather than one per item.
+   */
+  private async backfillGuids(batch: PlexCandidate[]): Promise<void> {
+    const missing = batch.filter((c) => !hasAnyGuid(c.guids))
+    if (missing.length === 0 || !this.server) return
 
-    if (!hasAnyGuid(guids) && this.server) {
-      try {
-        guids = await getItemGuids(this.server, candidate.ratingKey)
-      } catch (e) {
-        this.lastError = `Couldn't read details for "${candidate.title}" from Plex.`
-        console.error('Plex metadata lookup failed for', candidate.title, e)
-        return { reason: 'error' }
+    try {
+      const found = await getGuidsForItems(
+        this.server,
+        missing.map((c) => c.ratingKey),
+      )
+      for (const candidate of missing) {
+        candidate.guids = found.get(candidate.ratingKey) ?? candidate.guids
       }
+    } catch (e) {
+      // Leaves them without ids; they fall out as 'no-ids' below rather than
+      // being reported as a hard failure of the whole scan.
+      console.error('Plex metadata backfill failed', e)
     }
+  }
+
+  private async resolve(candidate: PlexCandidate): Promise<ResolveResult> {
+    const guids = candidate.guids
     if (!hasAnyGuid(guids)) return { reason: 'no-ids' }
 
     for (const provider of PROVIDERS[candidate.type]) {

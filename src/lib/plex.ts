@@ -252,13 +252,24 @@ export async function getUnwatchedItems(
  * candidates that arrived with nothing usable — one extra request, paid only
  * for the items that need it.
  */
-export async function getItemGuids(server: PlexServer, ratingKey: string): Promise<PlexGuids> {
+export async function getGuidsForItems(
+  server: PlexServer,
+  ratingKeys: string[],
+): Promise<Map<string, PlexGuids>> {
+  const out = new Map<string, PlexGuids>()
+  if (ratingKeys.length === 0) return out
+
+  // Plex accepts a comma-separated set of rating keys on this endpoint, so a
+  // whole batch costs one round trip.
+  const keys = ratingKeys.map((k) => encodeURIComponent(k)).join(',')
   const body = await serverJson<{ MediaContainer?: { Metadata?: PlexMetadata[] } }>(
     server,
-    `/library/metadata/${encodeURIComponent(ratingKey)}`,
+    `/library/metadata/${keys}`,
   )
-  const row = body.MediaContainer?.Metadata?.[0]
-  return row ? parseGuids(row) : {}
+  for (const row of body.MediaContainer?.Metadata ?? []) {
+    out.set(row.ratingKey, parseGuids(row))
+  }
+  return out
 }
 
 export function hasAnyGuid(guids: PlexGuids): boolean {

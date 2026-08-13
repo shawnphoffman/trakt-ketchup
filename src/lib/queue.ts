@@ -40,6 +40,8 @@ export class WatchedQueue {
   private pending: PendingItem[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   private inFlight: Promise<void> | null = null
+  /** Current backoff between retries of a failed flush; 0 when healthy. */
+  private retryDelay = 0
 
   /** @param onChange notified with the pending count whenever it changes
    *  (enqueue, undo, flush, or a failed flush re-queue) so the UI can track it. */
@@ -77,12 +79,15 @@ export class WatchedQueue {
     this.pending.push({ item, action, mode, payload })
     this.emit()
 
+    // Failures are logged and re-queued inside send(); swallowing the rejection
+    // here just stops these fire-and-forget flushes from surfacing as uncaught
+    // promise errors in the console.
     if (this.pending.length >= MAX_BATCH) {
-      void this.flush()
+      void this.flush().catch(() => {})
       return
     }
     if (this.timer) clearTimeout(this.timer)
-    this.timer = setTimeout(() => void this.flush(), DEBOUNCE_MS)
+    this.timer = setTimeout(() => void this.flush().catch(() => {}), DEBOUNCE_MS)
   }
 
   get pendingCount() {
@@ -163,8 +168,25 @@ export class WatchedQueue {
       console.error('Batch flush failed, re-queueing', firstError)
       this.pending.unshift(...failed)
       this.emit()
+      this.scheduleRetry()
       throw firstError
     }
+    this.retryDelay = 0
+  }
+
+  /**
+   * Retry a failed flush on its own timer.
+   *
+   * Without this, a re-queued batch only gets another attempt when the user
+   * happens to mark something else — so if they stop tapping (or the failure
+   * was a rate limit that cleared seconds later) the marks sit unsent until the
+   * page closes. Backing off matters as much as retrying: the most likely
+   * cause is Trakt rate limiting, and retrying hard makes that worse.
+   */
+  private scheduleRetry() {
+    this.retryDelay = this.retryDelay ? Math.min(this.retryDelay * 2, 60_000) : 5_000
+    if (this.timer) clearTimeout(this.timer)
+    this.timer = setTimeout(() => void this.flush().catch(() => {}), this.retryDelay)
   }
 }
 

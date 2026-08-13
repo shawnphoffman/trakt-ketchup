@@ -79,7 +79,43 @@ async function authHeaders(): Promise<Record<string, string>> {
   return headers
 }
 
+/**
+ * Client-side rate limiting for every Trakt call.
+ *
+ * Trakt allows roughly 1000 GETs per 5 minutes. Exceeding it is not a soft
+ * failure: Trakt's 429 response carries no `Access-Control-Allow-Origin`
+ * header, so the browser rejects it as an opaque CORS/NetworkError and the
+ * status code is unreadable from JS. Every over-limit request therefore looks
+ * like the network died, which is indistinguishable from a real outage and
+ * impossible to handle precisely after the fact.
+ *
+ * So we stay under the limit instead of reacting to it: all calls funnel
+ * through one promise chain that spaces them out. Resolving a large Plex
+ * library becomes slow rather than broken, which is the right trade since the
+ * feed only needs to stay a few cards ahead of the user.
+ */
+const MIN_CALL_SPACING_MS = 350 // ~2.8/s => ~850 per 5 min, safely under 1000
+
+let throttleChain: Promise<void> = Promise.resolve()
+let lastCallAt = 0
+
+function throttle(): Promise<void> {
+  throttleChain = throttleChain.then(async () => {
+    const wait = lastCallAt + MIN_CALL_SPACING_MS - Date.now()
+    if (wait > 0) await sleep(wait)
+    lastCallAt = Date.now()
+  })
+  return throttleChain
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  // The unload flush must not queue behind anything; losing the batch is the
+  // alternative, and it is a single request.
+  if (!init?.keepalive) await throttle()
   const res = await fetch(`${API}${path}`, { ...init, headers: { ...(await authHeaders()), ...(init?.headers ?? {}) } })
   if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
   return (await res.json()) as T
@@ -150,27 +186,32 @@ export async function lookupByExternalId(
 ): Promise<FeedItem | null> {
   const path = `/search/${provider}/${encodeURIComponent(id)}?type=${type}&extended=full,images`
 
-  // Resolving a whole library is thousands of lookups, which will meet Trakt's
-  // rate limit sooner or later. A 429 is expected traffic shaping, not an
-  // error, so wait it out once before giving up on the item.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await fetch(`${API}${path}`, { headers: await authHeaders() })
+  // A rejected fetch here is far more likely to be a rate-limited 429 stripped
+  // of its CORS headers than a genuine outage, and both want the same
+  // response: back off and try again rather than write the item off. Only a
+  // request that keeps failing is reported, so the caller can stop the scan.
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(2000 * attempt)
+    await throttle()
 
-    if (res.status === 429) {
-      const retryAfter = Number(res.headers.get('retry-after') ?? '2')
-      const waitMs = Math.min(Number.isFinite(retryAfter) ? retryAfter : 2, 10) * 1000
-      await new Promise((r) => setTimeout(r, waitMs))
-      continue
+    try {
+      const res = await fetch(`${API}${path}`, { headers: await authHeaders() })
+      if (res.status === 429) continue // readable only when CORS headers survive
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
+
+      const rows = (await res.json()) as SearchRow[]
+      const media = rows.find((row) => row.type === type)?.[type]
+      return media ? toFeedItem(type, media) : null
+    } catch (e) {
+      lastError = e
     }
-    if (res.status === 404) return null
-    if (!res.ok) throw new Error(`Trakt ${path} -> ${res.status}`)
-
-    const rows = (await res.json()) as SearchRow[]
-    const media = rows.find((row) => row.type === type)?.[type]
-    return media ? toFeedItem(type, media) : null
   }
 
-  throw new Error('Trakt rate limit: too many lookups, try again in a minute')
+  throw new Error(
+    `Trakt lookups are being rate limited or blocked (${lastError instanceof Error ? lastError.message : 'network error'}).`,
+  )
 }
 
 // ---- watched history + watchlist (for the exclusion cache) -----------------
