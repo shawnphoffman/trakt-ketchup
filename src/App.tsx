@@ -83,6 +83,7 @@ export default function App() {
   const [pending, setPending] = useState(0)
   const [showSettings, setShowSettings] = useState(false)
   const [resyncState, setResyncState] = useState<ResyncState>('idle')
+  const [counts, setCounts] = useState<ExclusionCounts | null>(null)
 
   const feedRef = useRef<CardFeed | null>(null)
   /** Same object as feedRef on /plex; kept typed so status() stays reachable. */
@@ -140,6 +141,7 @@ export default function App() {
           }
         }
         await syncExclusionCaches()
+        setCounts((await getMeta<ExclusionCounts>('exclusionCounts')) ?? null)
         const feed = await buildFeed()
         if (cancelled) return
         feedRef.current = feed
@@ -285,6 +287,7 @@ export default function App() {
     try {
       await queueRef.current?.flush() // land pending marks first, or we'd pull stale state
       await syncExclusionCaches({ force: true })
+      setCounts((await getMeta<ExclusionCounts>('exclusionCounts')) ?? null)
       const feed = await buildFeed()
       feedRef.current = feed
       historyRef.current = []
@@ -375,6 +378,7 @@ export default function App() {
           onPlexChange={updatePlexSettings}
           plexStatus={plexStatus}
           resyncState={resyncState}
+          counts={counts}
           onResync={() => void resync()}
           onDisconnect={() => {
             clearTokens()
@@ -616,7 +620,10 @@ async function syncExclusionCaches({ force = false } = {}) {
       if (fingerprint === (await getMeta<string>('exclusionsFingerprintV2'))) return
     } else {
       // If the check itself fails, fall back to the interval so a transient
-      // error can't strand the caches indefinitely.
+      // error can't strand the caches indefinitely. Note this skips silently,
+      // which is why the sync records what it holds: a rate-limited activity
+      // check lands here, and without a visible count an empty or stale
+      // exclusion cache is indistinguishable from "you haven't watched it".
       const last = (await getMeta<number>('exclusionsSyncedAt')) ?? 0
       if (Date.now() - last < WATCHED_SYNC_TTL) return
     }
@@ -632,10 +639,33 @@ async function syncExclusionCaches({ force = false } = {}) {
   await replaceWatchedCache([...entries(movieIds, 'movie'), ...entries(showIds, 'show')])
   await replaceWatchlistCache([...entries(wlMovieIds, 'movie'), ...entries(wlShowIds, 'show')])
   await setMeta('exclusionsSyncedAt', Date.now())
+  await setMeta('exclusionCounts', {
+    watched: movieIds.length + showIds.length,
+    watchlist: wlMovieIds.length + wlShowIds.length,
+    at: Date.now(),
+  } satisfies ExclusionCounts)
   // Key renamed when rows gained external ids: an unrecognised name forces one
   // full re-download, without which existing caches would hold Trakt-id-only
   // rows and never match a Plex card.
   if (fingerprint !== undefined) await setMeta('exclusionsFingerprintV2', fingerprint)
+}
+
+/** What the exclusion cache actually holds, so "why is this still showing up?"
+ *  is answerable from the UI instead of by guessing. */
+interface ExclusionCounts {
+  watched: number
+  watchlist: number
+  at: number
+}
+
+function describeCounts(counts: ExclusionCounts | null): string {
+  if (!counts) {
+    return "Your Trakt history hasn't been cached yet, so nothing is being filtered out."
+  }
+  const age = Date.now() - counts.at
+  const hours = Math.floor(age / 3_600_000)
+  const when = hours < 1 ? 'just now' : hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`
+  return `Hiding ${counts.watched} watched and ${counts.watchlist} watchlisted titles · synced ${when}.`
 }
 
 /** Full-viewport ambient background: the current title's blurred backdrop over
@@ -745,6 +775,7 @@ function SettingsPanel({
   onPlexChange,
   plexStatus,
   resyncState,
+  counts,
   onResync,
   onDisconnect,
   onDisconnectPlex,
@@ -755,6 +786,7 @@ function SettingsPanel({
   onPlexChange: (patch: Partial<PlexSettings>) => void
   plexStatus: PlexFeedStatus | null
   resyncState: ResyncState
+  counts: ExclusionCounts | null
   onResync: () => void
   onDisconnect: () => void
   onDisconnectPlex: () => void
@@ -809,7 +841,7 @@ function SettingsPanel({
             ? 'Up to date with Trakt.'
             : resyncState === 'failed'
               ? "Couldn't reach Trakt. Try again in a moment."
-              : 'Re-download your watched history and watchlist so already-seen titles stop appearing.'}
+              : describeCounts(counts)}
         </span>
       </div>
       {ROUTE === 'plex' && (
