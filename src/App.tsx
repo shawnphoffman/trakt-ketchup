@@ -3,6 +3,7 @@ import { Card } from './components/Card'
 import { beginLogin, clearTokens, completeLoginIfRedirected, loadTokens } from './lib/auth'
 import {
   getMeta,
+  getWatchedKeys,
   markUnwatchedLocal,
   markUnwatchlistLocal,
   markWatchedLocal,
@@ -615,15 +616,21 @@ async function syncExclusionCaches({ force = false } = {}) {
     fingerprint = undefined
   }
 
-  if (!force) {
+  // An empty cache excludes nothing, so every already-watched title leaks back
+  // into the feed. Never let the gates below skip in that state: both of them
+  // reason about *freshness*, which is meaningless when there is no data at
+  // all. This is reachable whenever the activity check fails (exactly what
+  // rate limiting does to it) while `exclusionsSyncedAt` is recent — the sync
+  // then silently does nothing for six hours, and the symptom looks like
+  // broken matching rather than a sync that never ran.
+  const isEmpty = (await getWatchedKeys()).size === 0
+
+  if (!force && !isEmpty) {
     if (fingerprint !== undefined) {
       if (fingerprint === (await getMeta<string>('exclusionsFingerprintV2'))) return
     } else {
       // If the check itself fails, fall back to the interval so a transient
-      // error can't strand the caches indefinitely. Note this skips silently,
-      // which is why the sync records what it holds: a rate-limited activity
-      // check lands here, and without a visible count an empty or stale
-      // exclusion cache is indistinguishable from "you haven't watched it".
+      // error can't strand the caches indefinitely.
       const last = (await getMeta<number>('exclusionsSyncedAt')) ?? 0
       if (Date.now() - last < WATCHED_SYNC_TTL) return
     }
