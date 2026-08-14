@@ -206,25 +206,55 @@ type ShowRow = { show: TraktMedia }
 // external ids are what let a Plex card be recognised as already-watched
 // without a per-title lookup to translate it first.
 
+/** Trakt's page size cap. Asking for more silently returns this many. */
+const SYNC_PAGE_SIZE = 100
+/** Backstop so a misbehaving endpoint can't loop forever. 100k titles. */
+const MAX_SYNC_PAGES = 1000
+
+/**
+ * Read a paginated sync list to the end.
+ *
+ * These endpoints cap a response at 100 items, and a truncated exclusion cache
+ * fails silently and confusingly: the feed simply re-offers titles beyond the
+ * cutoff, which reads as broken matching rather than missing data.
+ *
+ * Termination is by short page rather than by the `X-Pagination-*` headers,
+ * because those are only readable cross-origin if Trakt lists them in
+ * `Access-Control-Expose-Headers`. A short page is always observable, and the
+ * loop stays correct even if an endpoint ignores the paging parameters
+ * entirely and returns everything at once.
+ */
+async function allPages<T>(path: string): Promise<T[]> {
+  const out: T[] = []
+  const sep = path.includes('?') ? '&' : '?'
+
+  for (let page = 1; page <= MAX_SYNC_PAGES; page++) {
+    const rows = await api<T[]>(`${path}${sep}page=${page}&limit=${SYNC_PAGE_SIZE}`)
+    out.push(...rows)
+    if (rows.length < SYNC_PAGE_SIZE) break
+  }
+  return out
+}
+
 export async function getWatchedMovieIds(): Promise<TraktIds[]> {
-  const rows = await api<MovieRow[]>(`/sync/watched/movies`)
+  const rows = await allPages<MovieRow>(`/sync/watched/movies`)
   return rows.map((r) => r.movie.ids)
 }
 
 export async function getWatchedShowIds(): Promise<TraktIds[]> {
   // `extended=noseasons` drops the per-season/per-episode breakdown, which is
   // the bulk of this response and which we never read (we only want ids).
-  const rows = await api<ShowRow[]>(`/sync/watched/shows?extended=noseasons`)
+  const rows = await allPages<ShowRow>(`/sync/watched/shows?extended=noseasons`)
   return rows.map((r) => r.show.ids)
 }
 
 export async function getWatchlistMovieIds(): Promise<TraktIds[]> {
-  const rows = await api<MovieRow[]>(`/sync/watchlist/movies`)
+  const rows = await allPages<MovieRow>(`/sync/watchlist/movies`)
   return rows.map((r) => r.movie.ids)
 }
 
 export async function getWatchlistShowIds(): Promise<TraktIds[]> {
-  const rows = await api<ShowRow[]>(`/sync/watchlist/shows`)
+  const rows = await allPages<ShowRow>(`/sync/watchlist/shows`)
   return rows.map((r) => r.show.ids)
 }
 
